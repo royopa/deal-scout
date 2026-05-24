@@ -1,0 +1,7 @@
+.env
+channels.json
+channels.yaml
+__pycache__/
+*.session
+.pytest_cache/
+.DS_Store

@@ -1,0 +1,9 @@
+{
+  "webhook_url": "http://192.168.1.100:5678/webhook/dealscout",
+  "retry_attempts": 3,
+  "retry_delay_seconds": 5,
+  "channels": [
+    { "name": "Example Deal Channel", "id": -1001234567890 },
+    { "name": "Another Deals Group", "id": -1009876543210 }
+  ]
+}
