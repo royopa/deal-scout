@@ -1,11 +1,18 @@
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
 
-from listener import load_config, message_contains_url, send_webhook
+from listener import (
+    ConfigFileChangeHandler,
+    RuntimeConfig,
+    load_config,
+    message_contains_url,
+    send_webhook,
+)
 
 
 @pytest.mark.parametrize(
@@ -75,7 +82,7 @@ def test_load_config_defaults_and_missing_channels(tmp_path: Path):
 def test_load_config_missing_channel_id(tmp_path: Path):
     path = tmp_path / "channels.json"
     path.write_text(
-        '{"webhook_url":"http://localhost/webhook","channels":[{"name":"Deals"}]}',
+        ('{"webhook_url":"http://localhost/webhook",' '"channels":[{"name":"Deals"}]}'),
         encoding="utf-8",
     )
 
@@ -94,6 +101,67 @@ def test_load_config_bad_json(tmp_path: Path):
 def test_load_config_missing_file(tmp_path: Path):
     with pytest.raises(FileNotFoundError):
         load_config(str(tmp_path / "missing.json"))
+
+
+def test_runtime_config_updates_snapshot():
+    runtime = RuntimeConfig(
+        {
+            "webhook_url": "http://localhost/webhook",
+            "retry_attempts": 3,
+            "retry_delay_seconds": 1,
+            "channels": [{"id": -1001}],
+        }
+    )
+
+    runtime.update(
+        {
+            "webhook_url": "http://localhost/updated",
+            "retry_attempts": 5,
+            "retry_delay_seconds": 2,
+            "channels": [{"id": -2002}],
+        }
+    )
+    snapshot = runtime.snapshot()
+
+    assert snapshot["webhook_url"] == "http://localhost/updated"
+    assert snapshot["retry_attempts"] == 5
+    assert snapshot["retry_delay_seconds"] == 2
+    assert snapshot["channel_ids"] == {-2002}
+
+
+def test_config_file_change_handler_only_calls_callback_for_target_file(
+    tmp_path: Path,
+):
+    config_path = (tmp_path / "channels.json").resolve()
+    callback = MagicMock()
+    handler = ConfigFileChangeHandler(config_path, callback, logging.getLogger("test"))
+
+    handler.on_modified(
+        SimpleNamespace(
+            is_directory=False,
+            src_path=str(tmp_path / "other.json"),
+        )
+    )
+    callback.assert_not_called()
+
+    handler.on_modified(SimpleNamespace(is_directory=False, src_path=str(config_path)))
+    callback.assert_called_once()
+
+
+def test_config_file_change_handler_handles_move_events(tmp_path: Path):
+    config_path = (tmp_path / "channels.json").resolve()
+    callback = MagicMock()
+    handler = ConfigFileChangeHandler(config_path, callback, logging.getLogger("test"))
+
+    handler.on_moved(
+        SimpleNamespace(
+            is_directory=False,
+            src_path=str(tmp_path / "temp.json"),
+            dest_path=str(config_path),
+        )
+    )
+
+    callback.assert_called_once()
 
 
 def _response_context(status: int):
@@ -148,7 +216,11 @@ async def test_send_webhook_retry_then_success():
 @pytest.mark.asyncio
 async def test_send_webhook_all_retries_exhausted():
     session = MagicMock()
-    session.post.side_effect = [_response_context(500), _response_context(500), _response_context(500)]
+    session.post.side_effect = [
+        _response_context(500),
+        _response_context(500),
+        _response_context(500),
+    ]
 
     with patch("listener.asyncio.sleep", new=AsyncMock()) as sleep_mock:
         success = await send_webhook(

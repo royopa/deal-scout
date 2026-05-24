@@ -41,7 +41,7 @@ DealScout's listener watches configured Telegram channels in real time and forwa
 
 ## Channel Config
 
-The listener reads channel configuration at startup from `DEALSCOUT_CONFIG`, so channels can be added/removed without code changes.
+The listener reads channel configuration from `DEALSCOUT_CONFIG` and keeps watching that file while running. Any save/update to the file is reloaded automatically, so channels and retry settings can be changed without restarting the process.
 
 Example (`listener/channels.json.example`):
 
