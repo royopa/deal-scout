@@ -18,6 +18,10 @@ from telethon import TelegramClient, events, utils
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+
+class FatalListenerError(RuntimeError):
+    pass
+
 URL_PATTERN = re.compile(
     r"(https?://\S+|www\.\S+|\b\S+\.(?:com|net|org|io|co|deals)\b)",
     re.IGNORECASE,
@@ -719,7 +723,14 @@ async def start_listener(
             )
 
         try:
-            await client.start(phone=phone)
+            await client.connect()
+            if not await client.is_user_authorized():
+                raise FatalListenerError(
+                    "Telegram session is not authorized. "
+                    "Mount a pre-authenticated .session file in /data, or "
+                    "run the login flow once in an interactive environment."
+                )
+
             me = await client.get_me()
             startup_snapshot = config_state.snapshot()
             logger.info(
@@ -828,6 +839,9 @@ def main() -> None:
             )
             time.sleep(delay)
 
+        except FatalListenerError as exc:
+            logger.error("Listener cannot start: %s", exc)
+            break
         except KeyboardInterrupt:
             logger.info("Listener stopped by user")
             break

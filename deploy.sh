@@ -14,6 +14,7 @@ UID_ARG=""
 GID_ARG=""
 DO_DEPLOY=0
 COMPOSE_CMD="docker compose"
+SESSION_BASENAME="${DEALSCOUT_SESSION:-dealscout_session}"
 
 print_usage() {
   cat <<EOF
@@ -50,6 +51,18 @@ done
 
 echo "Preparing data directory: $DATA_DIR"
 mkdir -p "$DATA_DIR"
+
+# Copy a local authenticated Telethon session into the data dir if present.
+SESSION_SOURCE="${SESSION_BASENAME}.session"
+SESSION_TARGET="$DATA_DIR/${SESSION_BASENAME}.session"
+if [ -f "$SESSION_TARGET" ]; then
+  echo "Found existing $SESSION_TARGET; leaving as-is"
+elif [ -f "$SESSION_SOURCE" ]; then
+  cp "$SESSION_SOURCE" "$SESSION_TARGET"
+  echo "Copied local Telegram session to $SESSION_TARGET"
+else
+  echo "No local Telegram session found at $SESSION_SOURCE; container will need a pre-authenticated session file"
+fi
 
 # Copy channels.json.example to data dir if channels.json is not present
 EXAMPLE_SRC="listener/channels.json.example"
