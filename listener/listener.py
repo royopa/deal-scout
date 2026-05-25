@@ -15,6 +15,7 @@ import aiohttp
 import time
 import yaml
 from dotenv import load_dotenv
+from telethon.errors import SessionPasswordNeededError
 from telethon import TelegramClient, events, utils
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
@@ -145,6 +146,35 @@ def _env_flag(value: str | None) -> bool:
 
 def _can_use_interactive_auth() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _read_secret_from_tty(prompt: str, logger: logging.Logger) -> str:
+    try:
+        with open("/dev/tty", "r+") as tty:
+            tty.write(prompt)
+            tty.flush()
+            value = tty.readline().strip()
+            return value
+    except OSError:
+        logger.debug("/dev/tty not available; falling back to stdin prompt")
+        return input(prompt).strip()
+
+
+async def _interactive_telegram_login(
+    client: TelegramClient,
+    phone: str,
+    logger: logging.Logger,
+) -> None:
+    await client.send_code_request(phone)
+    code = _read_secret_from_tty("Please enter the Telegram code: ", logger)
+    try:
+        await client.sign_in(phone=phone, code=code)
+    except SessionPasswordNeededError:
+        password = _read_secret_from_tty(
+            "Please enter your Telegram 2FA password: ",
+            logger,
+        )
+        await client.sign_in(password=password)
 
 
 def _config_example_path() -> Path:
@@ -734,7 +764,7 @@ async def start_listener(
                     logger.warning(
                         "No authorized Telegram session found; starting interactive login"
                     )
-                    await client.start(phone=phone)
+                    await _interactive_telegram_login(client, phone, logger)
                 else:
                     raise FatalListenerError(
                         "Telegram session is not authorized. Mount a pre-authenticated "
