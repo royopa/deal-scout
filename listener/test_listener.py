@@ -487,8 +487,8 @@ def test_archive_message_to_csv_appends_rows_and_keeps_header_once(
             "sender_username": "ana",
             "message_id": 10,
             "message_date": "2026-05-24T11:59:00+00:00",
-            "message_length": 16,
-            "message_text": "Deal, with comma",
+            "message_length": 36,
+            "message_text": "Deal, with comma\nAnd \"quoted\" content",
             "contains_url": True,
             "extracted_urls": "https://example.com/deal",
             "url_count": 1,
@@ -527,7 +527,7 @@ def test_archive_message_to_csv_appends_rows_and_keeps_header_once(
 
     assert archive_path.exists()
     assert len(rows) == 2
-    assert rows[0]["message_text"] == "Deal, with comma"
+    assert rows[0]["message_text"] == "Deal, with comma\nAnd \"quoted\" content"
     assert rows[0]["source_channel_title"] == "Deals Channel"
     assert rows[0]["webhook_status"] == "sent"
     assert rows[1]["contains_url"] == "False"

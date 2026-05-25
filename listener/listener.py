@@ -339,7 +339,11 @@ def archive_message_to_csv(
     with CSV_WRITE_LOCK:
         needs_header = not path.exists() or path.stat().st_size == 0
         with path.open("a", encoding="utf-8", newline="") as file:
-            writer = csv.DictWriter(file, fieldnames=CSV_FIELDNAMES)
+            writer = csv.DictWriter(
+                file,
+                fieldnames=CSV_FIELDNAMES,
+                quoting=csv.QUOTE_ALL,
+            )
             if needs_header:
                 writer.writeheader()
             writer.writerow(row)
