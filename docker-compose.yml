@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   dealscout-listener:
     container_name: dealscout-listener

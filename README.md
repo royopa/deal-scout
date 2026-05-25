@@ -43,6 +43,14 @@ The stack builds the Python image, stores the Telethon session and CSV under a p
 
 In Portainer, choose `Stacks` -> `Add stack` -> `Repository` and point it at this repository so the `Dockerfile` is available during build.
 
+If you are testing on the host first, pull the latest repo and rebuild before running the login flow, otherwise Docker may keep using an older image:
+
+```bash
+git pull
+docker compose build --no-cache
+docker compose run --rm -it dealscout-listener
+```
+
 Before starting the stack, make sure the host directory pointed to by `DEALSCOUT_DATA_DIR` contains a `channels.json` file. You can start from `listener/channels.json.example` and copy it into that directory.
 
 Example environment values for the stack:
