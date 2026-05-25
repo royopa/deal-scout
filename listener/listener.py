@@ -138,20 +138,47 @@ def _env_flag(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def resolve_config_path(config_path: str) -> Path:
+def _config_example_path() -> Path:
+    return Path(__file__).resolve().with_name("channels.json.example")
+
+
+def resolve_config_path(
+    config_path: str,
+    logger: logging.Logger | None = None,
+) -> Path:
     path = Path(config_path).expanduser()
     if path.exists():
         return path.resolve()
 
+    candidate_paths: list[Path] = []
     if not path.is_absolute():
-        data_candidate = Path("/data") / path
-        if data_candidate.exists():
-            return data_candidate.resolve()
+        candidate_paths.append(Path("/data") / path)
+    elif path.parent == Path("/"):
+        candidate_paths.append(Path("/data") / path.name)
 
-    raise FileNotFoundError(
-        f"Config file not found: {config_path}. "
-        "Checked the provided path and /data/<filename>."
-    )
+    for candidate in candidate_paths:
+        if candidate.exists():
+            return candidate.resolve()
+
+    example_path = _config_example_path()
+    if not example_path.exists():
+        raise FileNotFoundError(
+            f"Config file not found: {config_path}. "
+            "No bundled channels.json.example was found to bootstrap it."
+        )
+
+    bootstrap_target = candidate_paths[0] if candidate_paths else path
+    bootstrap_target.parent.mkdir(parents=True, exist_ok=True)
+    bootstrap_target.write_text(example_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    if logger is not None:
+        logger.warning(
+            "Config file missing; bootstrapped default config from %s to %s",
+            example_path,
+            bootstrap_target,
+        )
+
+    return bootstrap_target.resolve()
 
 
 async def log_visible_monitored_channels(
@@ -491,8 +518,11 @@ class ConfigFileChangeHandler(FileSystemEventHandler):
         self.on_change()
 
 
-def load_config(config_path: str) -> Dict[str, Any]:
-    path = resolve_config_path(config_path)
+def load_config(
+    config_path: str,
+    logger: logging.Logger | None = None,
+) -> Dict[str, Any]:
+    path = resolve_config_path(config_path, logger=logger)
 
     try:
         raw_config = path.read_text(encoding="utf-8")
@@ -626,7 +656,7 @@ async def start_listener(
 
     def reload_config_from_disk() -> None:
         try:
-            fresh_config = load_config(str(config_path))
+            fresh_config = load_config(str(config_path), logger=logger)
         except (FileNotFoundError, OSError, ValueError) as exc:
             logger.error(
                 "Failed to reload config from %s: %s",
@@ -747,7 +777,7 @@ def main() -> None:
     except ValueError as exc:
         raise ValueError("TG_API_ID must be an integer") from exc
 
-    config = load_config(config_path)
+    config = load_config(config_path, logger=logger)
 
     env_webhook_enabled = os.getenv("DEALSCOUT_ENABLE_WEBHOOK")
     if env_webhook_enabled is not None:

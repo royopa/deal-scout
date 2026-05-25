@@ -1,10 +1,16 @@
 {
   "webhook_url": "http://192.168.1.100:5678/webhook/dealscout",
-  "webhook_enabled": false,
   "retry_attempts": 3,
   "retry_delay_seconds": 5,
   "channels": [
-    { "name": "Example Deal Channel", "id": -1001234567890 },
-    { "name": "Another Deals Group", "id": -1009876543210 }
+    { "name": "PC DO FAFA PROMOÇÔES", "id": -1001622757657 },
+    { "name": "Samuel F3lipe - Promoções", "id": -1001768101197 },
+    { "name": "La Promotion - Promoções", "id": -1001371796882 },
+    { "name": "[CANAL] Pechinchou Promoções", "id": -1001123335791 },
+    { "name": "Promobit - Promoções e Cupons de Desconto", "id": -1001446728597 },
+    { "name": "Mih - Cupons e Descontos✨🛍", "id": -1001689631417 },
+    { "name": "Cupom Online Promoções", "id": -1001035947476 },
+    { "name": "EscolhaSegura // Grupo de Ofertas🔥", "id": -1001176023440 },
+    { "name": "MM PROMO - Hardware e PC Gamer", "id": -1001611302810 }
   ]
 }
