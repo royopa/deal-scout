@@ -15,6 +15,10 @@ import aiohttp
 import time
 import yaml
 from dotenv import load_dotenv
+from message_parser import (
+    extract_urls as parser_extract_urls,
+    parse_structured_message,
+)
 from telethon.errors import SessionPasswordNeededError
 from telethon import TelegramClient, events, utils
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -30,6 +34,7 @@ URL_PATTERN = re.compile(
 )
 
 CSV_FIELDNAMES = [
+    "schema_version",
     "archived_at",
     "processed_at",
     "source_channel_id",
@@ -43,8 +48,23 @@ CSV_FIELDNAMES = [
     "message_date",
     "message_length",
     "message_text",
+    "normalized_message",
     "contains_url",
+    "product_url",
+    "product_domain",
+    "is_affiliate_url",
+    "product_price",
+    "product_price_raw",
+    "original_price",
+    "original_price_raw",
+    "price_currency",
+    "coupon_code",
+    "coupon_text",
+    "product_description",
+    "parse_status",
+    "parse_confidence",
     "extracted_urls",
+    "all_urls",
     "url_count",
     "has_image",
     "image_base64",
@@ -55,9 +75,7 @@ CSV_WRITE_LOCK = Lock()
 
 
 def message_contains_url(message: str | None) -> bool:
-    if not message:
-        return False
-    return bool(URL_PATTERN.search(message))
+    return bool(extract_urls(message))
 
 
 def _normalize_retry(value: Any, default: int) -> int:
@@ -85,9 +103,7 @@ def _normalize_bool(value: Any, default: bool = False) -> bool:
 
 
 def extract_urls(message: str | None) -> list[str]:
-    if not message:
-        return []
-    return URL_PATTERN.findall(message)
+    return parser_extract_urls(message)
 
 
 async def extract_image_base64(
@@ -300,11 +316,14 @@ def build_archive_record(
     has_image: bool,
     chat: Any = None,
     sender: Any = None,
+    structured_data: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    extracted_urls = extract_urls(message_text)
+    parsed = structured_data or parse_structured_message(message_text)
+    extracted_urls = parsed.get("all_urls") or []
     now_utc = datetime.now(timezone.utc).isoformat()
 
     return {
+        "schema_version": parsed.get("schema_version", "v2"),
         "archived_at": now_utc,
         "processed_at": now_utc,
         "source_channel_id": event.chat_id,
@@ -318,13 +337,39 @@ def build_archive_record(
         "message_date": event.date.isoformat() if event.date else None,
         "message_length": len(message_text),
         "message_text": message_text,
+        "normalized_message": parsed.get("normalized_message"),
         "contains_url": contains_url,
+        "product_url": parsed.get("product_url"),
+        "product_domain": parsed.get("product_domain"),
+        "is_affiliate_url": parsed.get("is_affiliate_url"),
+        "product_price": parsed.get("product_price"),
+        "product_price_raw": parsed.get("product_price_raw"),
+        "original_price": parsed.get("original_price"),
+        "original_price_raw": parsed.get("original_price_raw"),
+        "price_currency": parsed.get("price_currency"),
+        "coupon_code": parsed.get("coupon_code"),
+        "coupon_text": parsed.get("coupon_text"),
+        "product_description": parsed.get("product_description"),
+        "parse_status": parsed.get("parse_status"),
+        "parse_confidence": parsed.get("parse_confidence"),
         "extracted_urls": " | ".join(extracted_urls),
+        "all_urls": " | ".join(extracted_urls),
         "url_count": len(extracted_urls),
         "has_image": has_image,
         "image_base64": image_base64,
         "webhook_status": webhook_status,
     }
+
+
+def _read_existing_csv_header(path: Path) -> list[str] | None:
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    with path.open(encoding="utf-8", newline="") as file:
+        reader = csv.reader(file)
+        header = next(reader, None)
+        if not header:
+            return None
+        return [column.strip() for column in header if column.strip()]
 
 
 def archive_message_to_csv(
@@ -334,12 +379,13 @@ def archive_message_to_csv(
     path = Path(csv_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    row = {field_name: record.get(field_name) for field_name in CSV_FIELDNAMES}
-
     with CSV_WRITE_LOCK:
-        needs_header = not path.exists() or path.stat().st_size == 0
+        existing_header = _read_existing_csv_header(path)
+        fieldnames = existing_header or CSV_FIELDNAMES
+        row = {field_name: record.get(field_name) for field_name in fieldnames}
+        needs_header = existing_header is None
         with path.open("a", encoding="utf-8", newline="") as file:
-            writer = csv.DictWriter(file, fieldnames=CSV_FIELDNAMES)
+            writer = csv.DictWriter(file, fieldnames=fieldnames)
             if needs_header:
                 writer.writeheader()
             writer.writerow(row)
@@ -360,7 +406,8 @@ async def process_monitored_message(
     )
 
     message_text = event.raw_text or ""
-    contains_url = message_contains_url(message_text)
+    structured_data = parse_structured_message(message_text)
+    contains_url = bool(structured_data.get("url_count"))
     webhook_status = "skipped_no_url"
     chat = None
     sender = None
@@ -420,7 +467,7 @@ async def process_monitored_message(
         ),
         event.id,
         len(message_text),
-        len(extract_urls(message_text)),
+        structured_data.get("url_count", 0),
     )
 
     payload = {
@@ -428,6 +475,11 @@ async def process_monitored_message(
         "message": message_text,
         "message_id": event.id,
         "date": event.date.isoformat() if event.date else None,
+        "structured_data": structured_data,
+        "product_url": structured_data.get("product_url"),
+        "product_price": structured_data.get("product_price"),
+        "coupon_code": structured_data.get("coupon_code"),
+        "product_description": structured_data.get("product_description"),
     }
 
     webhook_enabled = runtime_config.get("webhook_enabled", False)
@@ -478,6 +530,7 @@ async def process_monitored_message(
         has_image=has_image,
         chat=chat,
         sender=sender,
+        structured_data=structured_data,
     )
 
     archive_message_to_csv(archive_path, archive_record)

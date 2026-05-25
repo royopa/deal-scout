@@ -1,14 +1,17 @@
 import logging
 import csv
 import base64
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
+from message_parser import parse_structured_message
 
 from listener import (
+    CSV_FIELDNAMES,
     ConfigFileChangeHandler,
     RuntimeConfig,
     archive_message_to_csv,
@@ -207,6 +210,29 @@ def test_extract_urls_returns_all_matches():
     ]
 
 
+def test_parse_structured_message_extracts_primary_fields():
+    message = (
+        "🔥 Fone Bluetooth JBL Tune\n"
+        "De R$ 299,90 por R$ 199,90\n"
+        "Use cupom: SOM10\n"
+        "https://amzn.to/abcd123?tag=aff"
+    )
+
+    parsed = parse_structured_message(message)
+
+    assert parsed["product_url"] == "https://amzn.to/abcd123?tag=aff"
+    assert parsed["product_domain"] == "amzn.to"
+    assert parsed["is_affiliate_url"] is True
+    assert parsed["product_price"] == 199.9
+    assert parsed["original_price"] == 299.9
+    assert parsed["price_currency"] == "BRL"
+    assert parsed["coupon_code"] == "SOM10"
+    assert "cupom" in (parsed["coupon_text"] or "").lower()
+    assert parsed["product_description"] == "🔥 Fone Bluetooth JBL Tune"
+    assert parsed["parse_status"] == "ok"
+    assert parsed["schema_version"] == "v2"
+
+
 def test_build_archive_record_includes_message_and_entity_metadata():
     event = SimpleNamespace(
         chat_id=-1001,
@@ -239,8 +265,13 @@ def test_build_archive_record_includes_message_and_entity_metadata():
     assert record["sender_name"] == "Ana Silva"
     assert record["sender_username"] == "ana"
     assert record["message_length"] == len("Promo at https://example.com/deal")
+    assert record["schema_version"] == "v2"
+    assert record["normalized_message"] == "Promo at https://example.com/deal"
     assert record["contains_url"] is True
+    assert record["product_url"] == "https://example.com/deal"
+    assert record["product_domain"] == "example.com"
     assert record["extracted_urls"] == "https://example.com/deal"
+    assert record["all_urls"] == "https://example.com/deal"
     assert record["url_count"] == 1
     assert record["has_image"] is False
     assert record["image_base64"] is None
@@ -320,6 +351,10 @@ async def test_process_monitored_message_with_fake_telegram_event(
             )
 
     assert webhook_mock.await_count == 1
+    sent_payload = webhook_mock.await_args.kwargs["payload"]
+    assert sent_payload["message_id"] == 42
+    assert sent_payload["product_url"] == "https://example.com/deal"
+    assert sent_payload["structured_data"]["schema_version"] == "v2"
     assert archive_path.exists()
 
     with archive_path.open(encoding="utf-8", newline="") as file:
@@ -328,6 +363,9 @@ async def test_process_monitored_message_with_fake_telegram_event(
     assert len(rows) == 1
     assert rows[0]["message_id"] == "42"
     assert rows[0]["webhook_status"] == "sent"
+    assert rows[0]["schema_version"] == "v2"
+    assert rows[0]["product_url"] == "https://example.com/deal"
+    assert rows[0]["product_domain"] == "example.com"
     assert rows[0]["has_image"] == "True"
     assert rows[0]["image_base64"] == base64.b64encode(
         b"fake-image-bytes"
@@ -443,25 +481,31 @@ async def test_start_listener_ignores_non_monitored_channel(
     http_session_context = MagicMock()
     http_session_context.__aenter__ = AsyncMock(return_value=http_session)
     http_session_context.__aexit__ = AsyncMock(return_value=None)
+    config_path = tmp_path / "channels.json"
+    config_path.write_text(
+        '{"webhook_enabled":false,"channels":[{"id":-2002}]}',
+        encoding="utf-8",
+    )
 
-    with patch("listener.TelegramClient", return_value=client):
-        with patch(
-            "listener.aiohttp.ClientSession",
-            return_value=http_session_context,
-        ):
+    with patch.dict(os.environ, {"DEALSCOUT_CONFIG": str(config_path)}):
+        with patch("listener.TelegramClient", return_value=client):
             with patch(
-                "listener.process_monitored_message",
-                new=AsyncMock(),
-            ) as process_mock:
-                with caplog.at_level(logging.INFO):
-                    await start_listener(
-                        api_id=123,
-                        api_hash="hash",
-                        phone="+551199999999",
-                        session_name="test-session",
-                        config=runtime_config,
-                        archive_csv_path=archive_path,
-                    )
+                "listener.aiohttp.ClientSession",
+                return_value=http_session_context,
+            ):
+                with patch(
+                    "listener.process_monitored_message",
+                    new=AsyncMock(),
+                ) as process_mock:
+                    with caplog.at_level(logging.INFO):
+                        await start_listener(
+                            api_id=123,
+                            api_hash="hash",
+                            phone="+551199999999",
+                            session_name="test-session",
+                            config=runtime_config,
+                            archive_csv_path=archive_path,
+                        )
 
     assert process_mock.await_count == 0
     assert not archive_path.exists()
@@ -476,6 +520,7 @@ def test_archive_message_to_csv_appends_rows_and_keeps_header_once(
     archive_message_to_csv(
         archive_path,
         {
+            "schema_version": "v2",
             "archived_at": "2026-05-24T12:00:00+00:00",
             "processed_at": "2026-05-24T12:00:00+00:00",
             "source_channel_id": -1001,
@@ -489,8 +534,23 @@ def test_archive_message_to_csv_appends_rows_and_keeps_header_once(
             "message_date": "2026-05-24T11:59:00+00:00",
             "message_length": 16,
             "message_text": "Deal, with comma",
+            "normalized_message": "Deal, with comma",
             "contains_url": True,
+            "product_url": "https://example.com/deal",
+            "product_domain": "example.com",
+            "is_affiliate_url": False,
+            "product_price": 199.9,
+            "product_price_raw": "R$ 199,90",
+            "original_price": 299.9,
+            "original_price_raw": "R$ 299,90",
+            "price_currency": "BRL",
+            "coupon_code": "SAVE10",
+            "coupon_text": "Use cupom SAVE10",
+            "product_description": "Mouse Gamer RGB",
+            "parse_status": "ok",
+            "parse_confidence": 0.95,
             "extracted_urls": "https://example.com/deal",
+            "all_urls": "https://example.com/deal",
             "url_count": 1,
             "has_image": True,
             "image_base64": "ZmFrZS1pbWFnZS1ieXRlcw==",
@@ -500,6 +560,7 @@ def test_archive_message_to_csv_appends_rows_and_keeps_header_once(
     archive_message_to_csv(
         archive_path,
         {
+            "schema_version": "v2",
             "archived_at": "2026-05-24T12:01:00+00:00",
             "processed_at": "2026-05-24T12:01:00+00:00",
             "source_channel_id": -1002,
@@ -513,8 +574,23 @@ def test_archive_message_to_csv_appends_rows_and_keeps_header_once(
             "message_date": "2026-05-24T12:00:30+00:00",
             "message_length": 13,
             "message_text": "No link here",
+            "normalized_message": "No link here",
             "contains_url": False,
+            "product_url": None,
+            "product_domain": None,
+            "is_affiliate_url": False,
+            "product_price": None,
+            "product_price_raw": None,
+            "original_price": None,
+            "original_price_raw": None,
+            "price_currency": None,
+            "coupon_code": None,
+            "coupon_text": None,
+            "product_description": "No link here",
+            "parse_status": "partial_no_url",
+            "parse_confidence": 0.3,
             "extracted_urls": "",
+            "all_urls": "",
             "url_count": 0,
             "has_image": False,
             "image_base64": None,
@@ -527,8 +603,10 @@ def test_archive_message_to_csv_appends_rows_and_keeps_header_once(
 
     assert archive_path.exists()
     assert len(rows) == 2
+    assert rows[0]["schema_version"] == "v2"
     assert rows[0]["message_text"] == "Deal, with comma"
     assert rows[0]["source_channel_title"] == "Deals Channel"
+    assert rows[0]["product_price"] == "199.9"
     assert rows[0]["webhook_status"] == "sent"
     assert rows[1]["contains_url"] == "False"
     assert rows[1]["webhook_status"] == "skipped_no_url"
@@ -542,6 +620,7 @@ def test_archive_message_to_csv_creates_missing_file_and_parent_directory(
     archive_message_to_csv(
         archive_path,
         {
+            "schema_version": "v2",
             "archived_at": "2026-05-24T12:30:00+00:00",
             "processed_at": "2026-05-24T12:30:00+00:00",
             "source_channel_id": -1003,
@@ -555,8 +634,23 @@ def test_archive_message_to_csv_creates_missing_file_and_parent_directory(
             "message_date": "2026-05-24T12:29:30+00:00",
             "message_length": 20,
             "message_text": "Fresh deal message",
+            "normalized_message": "Fresh deal message",
             "contains_url": False,
+            "product_url": None,
+            "product_domain": None,
+            "is_affiliate_url": False,
+            "product_price": None,
+            "product_price_raw": None,
+            "original_price": None,
+            "original_price_raw": None,
+            "price_currency": None,
+            "coupon_code": None,
+            "coupon_text": None,
+            "product_description": "Fresh deal message",
+            "parse_status": "partial_no_url",
+            "parse_confidence": 0.3,
             "extracted_urls": "",
+            "all_urls": "",
             "url_count": 0,
             "has_image": False,
             "image_base64": None,
@@ -571,7 +665,40 @@ def test_archive_message_to_csv_creates_missing_file_and_parent_directory(
         rows = list(csv.DictReader(file))
 
     assert len(rows) == 1
+    assert set(rows[0].keys()) == set(CSV_FIELDNAMES)
     assert rows[0]["message_text"] == "Fresh deal message"
+
+
+def test_archive_message_to_csv_keeps_legacy_header_when_file_exists(
+    tmp_path: Path,
+):
+    archive_path = tmp_path / "legacy" / "messages.csv"
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_text(
+        "message_id,message_text,webhook_status\n"
+        "1,legacy row,sent\n",
+        encoding="utf-8",
+    )
+
+    archive_message_to_csv(
+        archive_path,
+        {
+            "message_id": 2,
+            "message_text": "new row",
+            "webhook_status": "skipped_no_url",
+            "product_url": "https://example.com/deal",
+            "schema_version": "v2",
+        },
+    )
+
+    with archive_path.open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+
+    assert len(rows) == 2
+    assert list(rows[1].keys()) == ["message_id", "message_text", "webhook_status"]
+    assert rows[1]["message_id"] == "2"
+    assert rows[1]["message_text"] == "new row"
+    assert rows[1]["webhook_status"] == "skipped_no_url"
 
 
 def test_config_file_change_handler_only_calls_callback_for_target_file(

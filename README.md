@@ -86,11 +86,36 @@ With those values, the container will use:
 
 The listener reads channel configuration from `DEALSCOUT_CONFIG` and keeps watching that file while running. Any save/update to the file is reloaded automatically, so channels and retry settings can be changed without restarting the process.
 
-Messages from monitored channels are appended to the CSV archive defined by `DEALSCOUT_ARCHIVE_CSV`. Each row stores the message text, timestamp, channel ID, URL detection flag, and webhook result status.
+Messages from monitored channels are appended to the CSV archive defined by `DEALSCOUT_ARCHIVE_CSV`.
+The archive now uses a structured schema (`schema_version=v2`) with one row per Telegram message, prioritizing a single "primary product" while preserving aggregated data for auditing.
 
 Webhook delivery is disabled by default. When you want to turn it back on, set `DEALSCOUT_ENABLE_WEBHOOK=true` or add `"webhook_enabled": true` to the channel config.
 
-The CSV also includes richer metadata for future analysis, such as channel title and username, sender details, message length, the list of URLs extracted from the message, and `image_base64` when the message includes a photo.
+In addition to channel/sender metadata and media fields, the structured schema includes:
+
+- URL fields: `product_url`, `product_domain`, `is_affiliate_url`, `all_urls`, `url_count`
+- Price fields: `product_price`, `product_price_raw`, `original_price`, `original_price_raw`, `price_currency`
+- Coupon fields: `coupon_code`, `coupon_text`
+- Content quality fields: `normalized_message`, `product_description`, `parse_status`, `parse_confidence`
+
+Selection and parsing rules:
+
+- Multiple items in the same message: stored as a single CSV row, with the best candidate promoted to `product_url` and all links preserved in `all_urls`.
+- Empty/missing values: stored as empty CSV cells (generated from `None` in the listener record).
+- Price parsing focuses on common PT-BR/BRL formats (`R$ 1.299,90`, `1299,90`, `1.299`).
+- Webhook payloads keep backward compatibility (`message`, `message_id`, etc.) and now include `structured_data` plus key promoted fields.
+
+CSV compatibility strategy:
+
+- New archive files are created with the extended `v2` header.
+- If an existing archive already has an older header, the listener appends using the legacy header instead of rewriting historical rows.
+- This avoids breaking existing archives while allowing new deployments to start with the structured schema.
+
+Known limitations (current heuristics):
+
+- URL, price, and coupon extraction are heuristic and may need refinement per channel style.
+- Multi-product messages are flattened to a single primary product (future evolution path: 1:N rows per message).
+- Non-BRL currencies are not normalized in this phase.
 
 Example (`listener/channels.json.example`):
 
