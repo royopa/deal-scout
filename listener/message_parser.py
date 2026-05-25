@@ -59,6 +59,18 @@ MARKETPLACE_HINTS = (
     "ponto",
     "carrefour",
 )
+URL_CONTEXT_WINDOW = 80
+PRICE_CONTEXT_WINDOW = 40
+MAX_PRICE_BRL = Decimal("1000000")
+MAX_PRICE_LINE_LENGTH = 18
+MIN_DESCRIPTION_LENGTH = 4
+MAX_DESCRIPTION_LENGTH = 280
+CONFIDENCE_BASE = 0.1
+CONFIDENCE_URL_WEIGHT = 0.35
+CONFIDENCE_PRICE_WEIGHT = 0.25
+CONFIDENCE_DESCRIPTION_WEIGHT = 0.2
+CONFIDENCE_COUPON_WEIGHT = 0.1
+CONFIDENCE_ORIGINAL_PRICE_WEIGHT = 0.1
 
 
 def normalize_message_text(message: str | None) -> str:
@@ -132,8 +144,8 @@ def _score_url(url: str, message: str) -> int:
         score += 5
     match = re.search(re.escape(url), message, re.IGNORECASE)
     if match:
-        left = max(0, match.start() - 80)
-        right = min(len(message), match.end() + 80)
+        left = max(0, match.start() - URL_CONTEXT_WINDOW)
+        right = min(len(message), match.end() + URL_CONTEXT_WINDOW)
         context = message[left:right]
         if PRODUCT_CONTEXT_PATTERN.search(context):
             score += 15
@@ -157,7 +169,7 @@ def _normalize_brl_price(raw: str) -> float | None:
         value = Decimal(candidate)
     except InvalidOperation:
         return None
-    if value <= 0 or value > Decimal("1000000"):
+    if value <= 0 or value > MAX_PRICE_BRL:
         return None
     return float(value)
 
@@ -170,7 +182,7 @@ def _extract_price_candidates(message: str) -> list[dict[str, Any]]:
         if value is None:
             continue
         start = match.start()
-        left = max(0, start - 40)
+        left = max(0, start - PRICE_CONTEXT_WINDOW)
         context = message[left : match.end()].lower()
         candidates.append(
             {
@@ -250,14 +262,14 @@ def _extract_description(message: str, urls: list[str]) -> str | None:
             continue
         if any(url in lowered for url in url_set):
             continue
-        if PRICE_PATTERN.search(line) and len(line) <= 18:
+        if PRICE_PATTERN.search(line) and len(line) <= MAX_PRICE_LINE_LENGTH:
             continue
-        if len(line) < 4:
+        if len(line) < MIN_DESCRIPTION_LENGTH:
             continue
         return line
 
     fallback = lines[0]
-    return fallback[:280] if fallback else None
+    return fallback[:MAX_DESCRIPTION_LENGTH] if fallback else None
 
 
 def parse_structured_message(message: str | None) -> dict[str, Any]:
@@ -286,17 +298,17 @@ def parse_structured_message(message: str | None) -> dict[str, Any]:
     description = _extract_description(normalized_message, urls)
 
     parse_status = "ok" if product_url else "partial_no_url"
-    confidence = 0.1
+    confidence = CONFIDENCE_BASE
     if product_url:
-        confidence += 0.35
+        confidence += CONFIDENCE_URL_WEIGHT
     if product_price is not None:
-        confidence += 0.25
+        confidence += CONFIDENCE_PRICE_WEIGHT
     if description:
-        confidence += 0.2
+        confidence += CONFIDENCE_DESCRIPTION_WEIGHT
     if coupon_code:
-        confidence += 0.1
+        confidence += CONFIDENCE_COUPON_WEIGHT
     if original_price_value is not None:
-        confidence += 0.1
+        confidence += CONFIDENCE_ORIGINAL_PRICE_WEIGHT
 
     return {
         "normalized_message": normalized_message,
