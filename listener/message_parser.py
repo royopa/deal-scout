@@ -26,6 +26,10 @@ PRODUCT_CONTEXT_PATTERN = re.compile(
     r"(produto|oferta|promo|promoção|desconto|aproveite|compre|link|loja)",
     re.IGNORECASE,
 )
+IGNORED_DESCRIPTION_LINE_PATTERN = re.compile(
+    r"^(https?://|www\.|#|cupom|c[oó]digo|use\s+|clique|acesse|link\b)",
+    re.IGNORECASE,
+)
 
 AFFILIATE_HINTS = (
     "utm_",
@@ -71,6 +75,7 @@ CONFIDENCE_PRICE_WEIGHT = 0.25
 CONFIDENCE_DESCRIPTION_WEIGHT = 0.2
 CONFIDENCE_COUPON_WEIGHT = 0.1
 CONFIDENCE_ORIGINAL_PRICE_WEIGHT = 0.1
+DESCRIPTION_STRIP_CHARS = " -•\t"
 
 
 def normalize_message_text(message: str | None) -> str:
@@ -81,14 +86,16 @@ def normalize_message_text(message: str | None) -> str:
     return text.strip()
 
 
-def _clean_url(url: str) -> str:
+def _strip_url_trailing_punctuation(url: str) -> str:
     return url.rstrip(".,;:!?)]}>\"'")
 
 
 def extract_urls(message: str | None) -> list[str]:
     if not message:
         return []
-    found = [_clean_url(url) for url in URL_PATTERN.findall(message)]
+    found = [
+        _strip_url_trailing_punctuation(url) for url in URL_PATTERN.findall(message)
+    ]
     deduped: list[str] = []
     seen: set[str] = set()
     for url in found:
@@ -98,6 +105,12 @@ def extract_urls(message: str | None) -> list[str]:
         deduped.append(url)
         seen.add(key)
     return deduped
+
+
+def message_contains_url(message: str | None) -> bool:
+    if not message:
+        return False
+    return bool(URL_PATTERN.search(message))
 
 
 def _to_url_candidate(url: str) -> str:
@@ -246,19 +259,19 @@ def _extract_coupon_data(message: str) -> tuple[str | None, str | None]:
 
 
 def _extract_description(message: str, urls: list[str]) -> str | None:
-    lines = [line.strip(" -•\t") for line in message.splitlines() if line.strip()]
+    lines = [
+        line.strip(DESCRIPTION_STRIP_CHARS)
+        for line in message.splitlines()
+        if line.strip()
+    ]
     if not lines:
         return None
 
-    ignored_line = re.compile(
-        r"^(https?://|www\.|#|cupom|c[oó]digo|use\s+|clique|acesse|link\b)",
-        re.IGNORECASE,
-    )
     url_set = {url.lower() for url in urls}
 
     for line in lines:
         lowered = line.lower()
-        if ignored_line.search(lowered):
+        if IGNORED_DESCRIPTION_LINE_PATTERN.search(lowered):
             continue
         if any(url in lowered for url in url_set):
             continue

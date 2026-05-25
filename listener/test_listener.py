@@ -27,6 +27,9 @@ from listener import (
 )
 
 
+LEGACY_HEADER_FIELDS = ["message_id", "message_text", "webhook_status"]
+
+
 @pytest.mark.parametrize(
     "message,expected",
     [
@@ -695,7 +698,7 @@ def test_archive_message_to_csv_keeps_legacy_header_when_file_exists(
         rows = list(csv.DictReader(file))
 
     assert len(rows) == 2
-    assert list(rows[1].keys()) == ["message_id", "message_text", "webhook_status"]
+    assert list(rows[1].keys()) == LEGACY_HEADER_FIELDS
     assert rows[1]["message_id"] == "2"
     assert rows[1]["message_text"] == "new row"
     assert rows[1]["webhook_status"] == "skipped_no_url"

@@ -17,6 +17,7 @@ import yaml
 from dotenv import load_dotenv
 from message_parser import (
     extract_urls as parser_extract_urls,
+    message_contains_url as parser_message_contains_url,
     parse_structured_message,
 )
 from telethon.errors import SessionPasswordNeededError
@@ -75,7 +76,7 @@ CSV_WRITE_LOCK = Lock()
 
 
 def message_contains_url(message: str | None) -> bool:
-    return bool(extract_urls(message))
+    return parser_message_contains_url(message)
 
 
 def _normalize_retry(value: Any, default: int) -> int:
