@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
@@ -140,6 +141,10 @@ def _format_entity_type(entity: Any) -> str | None:
 
 def _env_flag(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _can_use_interactive_auth() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
 
 
 def _config_example_path() -> Path:
@@ -725,10 +730,22 @@ async def start_listener(
         try:
             await client.connect()
             if not await client.is_user_authorized():
+                if _can_use_interactive_auth():
+                    logger.warning(
+                        "No authorized Telegram session found; starting interactive login"
+                    )
+                    await client.start(phone=phone)
+                else:
+                    raise FatalListenerError(
+                        "Telegram session is not authorized. Mount a pre-authenticated "
+                        "session file in /data, or run the listener attached to a terminal "
+                        "for the first login so Telethon can prompt for the code."
+                    )
+
+            if not await client.is_user_authorized():
                 raise FatalListenerError(
                     "Telegram session is not authorized. "
-                    "Mount a pre-authenticated .session file in /data, or "
-                    "run the login flow once in an interactive environment."
+                    "Interactive login did not complete successfully."
                 )
 
             me = await client.get_me()

@@ -9,19 +9,6 @@ services:
     restart: always
     env_file:
       - stack.env
-    environment:
-      TG_API_ID: ${TG_API_ID}
-      TG_API_HASH: ${TG_API_HASH}
-      TG_PHONE: ${TG_PHONE}
-      DEALSCOUT_SESSION: ${DEALSCOUT_SESSION:-/data/dealscout_session}
-      DEALSCOUT_CONFIG: ${DEALSCOUT_CONFIG:-/data/channels.json}
-      DEALSCOUT_ARCHIVE_CSV: ${DEALSCOUT_ARCHIVE_CSV:-/data/message_archive.csv}
-      DEALSCOUT_ENABLE_WEBHOOK: ${DEALSCOUT_ENABLE_WEBHOOK:-false}
-      DEALSCOUT_VERBOSE_STARTUP: ${DEALSCOUT_VERBOSE_STARTUP:-false}
-      DEALSCOUT_AUTO_RESTART: ${DEALSCOUT_AUTO_RESTART:-true}
-      DEALSCOUT_MAX_RESTARTS: ${DEALSCOUT_MAX_RESTARTS:-0}
-      DEALSCOUT_RESTART_DELAY_SECONDS: ${DEALSCOUT_RESTART_DELAY_SECONDS:-1}
-      DEALSCOUT_MAX_RESTART_DELAY_SECONDS: ${DEALSCOUT_MAX_RESTART_DELAY_SECONDS:-300}
     volumes:
       - dealscout_data:/data
     logging:
