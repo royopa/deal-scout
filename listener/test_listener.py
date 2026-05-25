@@ -115,8 +115,22 @@ def test_load_config_bad_json(tmp_path: Path):
 
 
 def test_load_config_missing_file(tmp_path: Path):
-    with pytest.raises(FileNotFoundError):
-        load_config(str(tmp_path / "missing.json"))
+    config_path = tmp_path / "missing.json"
+
+    config = load_config(str(config_path))
+
+    assert config["channels"]
+    assert config_path.exists()
+
+
+def test_can_use_interactive_auth_with_tty_access():
+    with patch("listener.sys.stdin.isatty", return_value=False):
+        with patch("listener.sys.stdout.isatty", return_value=False):
+            with patch("builtins.open", create=True) as open_mock:
+                open_mock.return_value.__enter__.return_value = MagicMock()
+                from listener import _can_use_interactive_auth
+
+                assert _can_use_interactive_auth() is True
 
 
 def test_runtime_config_updates_snapshot():
@@ -401,7 +415,8 @@ async def test_start_listener_ignores_non_monitored_channel(
         ),
     )
     client = MagicMock()
-    client.start = AsyncMock()
+    client.connect = AsyncMock()
+    client.is_user_authorized = AsyncMock(return_value=True)
     client.get_me = AsyncMock(
         return_value=SimpleNamespace(id=123, username="listener", phone="55")
     )

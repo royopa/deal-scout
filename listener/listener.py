@@ -145,7 +145,17 @@ def _env_flag(value: str | None) -> bool:
 
 
 def _can_use_interactive_auth() -> bool:
-    return sys.stdin.isatty() and sys.stdout.isatty()
+    if _env_flag(os.getenv("DEALSCOUT_FORCE_INTERACTIVE_LOGIN")):
+        return True
+
+    if sys.stdin.isatty() and sys.stdout.isatty():
+        return True
+
+    try:
+        with open("/dev/tty", "r"):
+            return True
+    except OSError:
+        return False
 
 
 def _read_secret_from_tty(prompt: str, logger: logging.Logger) -> str:
@@ -165,11 +175,13 @@ async def _interactive_telegram_login(
     phone: str,
     logger: logging.Logger,
 ) -> None:
+    logger.info("Requesting Telegram login code")
     await client.send_code_request(phone)
     code = _read_secret_from_tty("Please enter the Telegram code: ", logger)
     try:
         await client.sign_in(phone=phone, code=code)
     except SessionPasswordNeededError:
+        logger.info("Telegram 2FA password required")
         password = _read_secret_from_tty(
             "Please enter your Telegram 2FA password: ",
             logger,
