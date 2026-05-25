@@ -138,6 +138,22 @@ def _env_flag(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
+def resolve_config_path(config_path: str) -> Path:
+    path = Path(config_path).expanduser()
+    if path.exists():
+        return path.resolve()
+
+    if not path.is_absolute():
+        data_candidate = Path("/data") / path
+        if data_candidate.exists():
+            return data_candidate.resolve()
+
+    raise FileNotFoundError(
+        f"Config file not found: {config_path}. "
+        "Checked the provided path and /data/<filename>."
+    )
+
+
 async def log_visible_monitored_channels(
     client: TelegramClient,
     monitored_channel_ids: set[int],
@@ -476,9 +492,7 @@ class ConfigFileChangeHandler(FileSystemEventHandler):
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
-    path = Path(config_path)
-    if not path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
+    path = resolve_config_path(config_path)
 
     try:
         raw_config = path.read_text(encoding="utf-8")
@@ -586,9 +600,9 @@ async def start_listener(
             "Webhook delivery is disabled; messages will only be archived"
         )
 
-    config_path = Path(
+    config_path = resolve_config_path(
         os.getenv("DEALSCOUT_CONFIG", "channels.json")
-    ).resolve()
+    )
     archive_path = Path(
         os.getenv("DEALSCOUT_ARCHIVE_CSV", archive_csv_path)
     ).resolve()
