@@ -33,6 +33,34 @@ The listener now logs each processing step in the terminal, making it easier to 
 
 5. Update your credentials and config values.
 
+## Docker / Portainer
+
+If you want to run the listener on Umbrel through Portainer, use the root `docker-compose.yml` in this repository.
+
+Important: this compose file uses `build:` and `Dockerfile`, so it must be deployed from a Portainer stack created from a Git repository checkout, not pasted into the plain web editor. If you paste the YAML into the editor without repository context, Portainer will fail with `failed to read dockerfile: open Dockerfile: no such file or directory`.
+
+The stack builds the Python image, stores the Telethon session and CSV under a persistent `/data` directory, and keeps the webhook disabled by default.
+
+In Portainer, choose `Stacks` -> `Add stack` -> `Repository` and point it at this repository so the `Dockerfile` is available during build.
+
+Before starting the stack, make sure the host directory pointed to by `DEALSCOUT_DATA_DIR` contains a `channels.json` file. You can start from `listener/channels.json.example` and copy it into that directory.
+
+Example environment values for the stack:
+
+```bash
+TG_API_ID=12345
+TG_API_HASH=your_api_hash_here
+TG_PHONE=+5511999999999
+DEALSCOUT_DATA_DIR=/opt/dealscout
+DEALSCOUT_ENABLE_WEBHOOK=false
+```
+
+With those values, the container will use:
+
+- `/opt/dealscout/channels.json` for the channel config
+- `/opt/dealscout/dealscout_session.session` for the Telegram session
+- `/opt/dealscout/message_archive.csv` for the message archive
+
 ## Environment Variables
 
 | Variable | Required | Default | Description |

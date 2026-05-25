@@ -11,6 +11,7 @@ from threading import Lock
 from typing import Any, Callable, Dict
 
 import aiohttp
+import time
 import yaml
 from dotenv import load_dotenv
 from telethon import TelegramClient, events, utils
@@ -741,12 +742,66 @@ def main() -> None:
             config.get("webhook_enabled", False),
         )
 
+    auto_restart = _normalize_bool(
+        os.getenv("DEALSCOUT_AUTO_RESTART"),
+        True,
+    )
+    max_restarts_raw = os.getenv("DEALSCOUT_MAX_RESTARTS")
     try:
-        asyncio.run(
-            start_listener(api_id, api_hash, phone, session_name, config)
-        )
-    except KeyboardInterrupt:
-        logger.info("Listener stopped by user")
+        max_restarts = int(max_restarts_raw) if max_restarts_raw is not None else 0
+    except ValueError:
+        max_restarts = 0
+
+    base_delay = _normalize_retry(os.getenv("DEALSCOUT_RESTART_DELAY_SECONDS"), 1)
+    max_delay = _normalize_retry(os.getenv("DEALSCOUT_MAX_RESTART_DELAY_SECONDS"), 300)
+
+    attempt = 0
+    while True:
+        try:
+            attempt += 1
+            logger.info("Starting listener (attempt=%s)", attempt)
+            asyncio.run(
+                start_listener(api_id, api_hash, phone, session_name, config)
+            )
+
+            # If start_listener returns normally, only restart if auto_restart
+            if not auto_restart:
+                logger.info("Listener exited normally and auto-restart is disabled")
+                break
+
+            if max_restarts and attempt >= max_restarts:
+                logger.error(
+                    "Max restart attempts reached (%s); not restarting",
+                    max_restarts,
+                )
+                break
+
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            logger.warning(
+                "Listener exited; will restart after %s seconds (attempt=%s)",
+                delay,
+                attempt + 1,
+            )
+            time.sleep(delay)
+
+        except KeyboardInterrupt:
+            logger.info("Listener stopped by user")
+            break
+        except Exception:
+            logger.exception("Listener crashed unexpectedly")
+            if not auto_restart:
+                break
+
+            if max_restarts and attempt >= max_restarts:
+                logger.error(
+                    "Max restart attempts reached (%s) after crash; giving up",
+                    max_restarts,
+                )
+                break
+
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            logger.info("Restarting listener after %s seconds", delay)
+            time.sleep(delay)
 
 
 if __name__ == "__main__":

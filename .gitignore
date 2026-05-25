@@ -4,4 +4,9 @@ channels.yaml
 __pycache__/
 *.session
 .pytest_cache/
+message_archive.csv
+data/
+.venv/
+.env.local
 .DS_Store
+stack.env

@@ -1,0 +1,10 @@
+.git
+.pytest_cache/
+__pycache__/
+*.pyc
+*.pyo
+*.session
+message_archive.csv
+listener/message_archive.csv
+listener/__pycache__
+listener/.pytest_cache
