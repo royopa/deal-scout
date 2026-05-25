@@ -1,4 +1,6 @@
 import logging
+import csv
+import base64
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -9,8 +11,15 @@ import pytest
 from listener import (
     ConfigFileChangeHandler,
     RuntimeConfig,
+    archive_message_to_csv,
+    build_archive_record,
+    extract_image_base64,
+    extract_urls,
     load_config,
     message_contains_url,
+    log_visible_monitored_channels,
+    process_monitored_message,
+    start_listener,
     send_webhook,
 )
 
@@ -70,19 +79,26 @@ channels:
 
 def test_load_config_defaults_and_missing_channels(tmp_path: Path):
     path = tmp_path / "channels.json"
-    path.write_text('{"webhook_url":"http://localhost/webhook"}', encoding="utf-8")
+    path.write_text(
+        '{"webhook_url":"http://localhost/webhook"}',
+        encoding="utf-8",
+    )
 
     config = load_config(str(path))
 
     assert config["channels"] == []
     assert config["retry_attempts"] == 3
     assert config["retry_delay_seconds"] == 5
+    assert config["webhook_enabled"] is False
 
 
 def test_load_config_missing_channel_id(tmp_path: Path):
     path = tmp_path / "channels.json"
     path.write_text(
-        ('{"webhook_url":"http://localhost/webhook",' '"channels":[{"name":"Deals"}]}'),
+        (
+            '{"webhook_url":"http://localhost/webhook",'
+            '"channels":[{"name":"Deals"}]}'
+        ),
         encoding="utf-8",
     )
 
@@ -109,6 +125,7 @@ def test_runtime_config_updates_snapshot():
             "webhook_url": "http://localhost/webhook",
             "retry_attempts": 3,
             "retry_delay_seconds": 1,
+            "webhook_enabled": False,
             "channels": [{"id": -1001}],
         }
     )
@@ -118,6 +135,7 @@ def test_runtime_config_updates_snapshot():
             "webhook_url": "http://localhost/updated",
             "retry_attempts": 5,
             "retry_delay_seconds": 2,
+            "webhook_enabled": True,
             "channels": [{"id": -2002}],
         }
     )
@@ -127,6 +145,418 @@ def test_runtime_config_updates_snapshot():
     assert snapshot["retry_attempts"] == 5
     assert snapshot["retry_delay_seconds"] == 2
     assert snapshot["channel_ids"] == {-2002}
+    assert snapshot["webhook_enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_log_visible_monitored_channels_reports_visible_and_missing(
+    caplog,
+):
+    monitored_ids = {-1001, -2002}
+    dialogs = [
+        SimpleNamespace(entity=SimpleNamespace(title="Deals A")),
+        SimpleNamespace(entity=SimpleNamespace(title="Deals B")),
+    ]
+    client = MagicMock()
+    client.get_dialogs = AsyncMock(return_value=dialogs)
+
+    with patch("listener.utils.get_peer_id", side_effect=[-1001, -3003]):
+        with caplog.at_level(logging.INFO):
+            await log_visible_monitored_channels(
+                client=client,
+                monitored_channel_ids=monitored_ids,
+                logger=logging.getLogger("test"),
+            )
+
+    assert (
+        "Verbose startup: monitored chats visible in this session"
+        in caplog.text
+    )
+    assert "-1001 (Deals A)" in caplog.text
+    assert (
+        "Verbose startup: monitored chat ids not visible in this session: "
+        "[-2002]"
+        in caplog.text
+    )
+
+
+def test_extract_urls_returns_all_matches():
+    message = (
+        "Deal at https://example.com/a and also www.test.com "
+        "plus offer.io"
+    )
+
+    assert extract_urls(message) == [
+        "https://example.com/a",
+        "www.test.com",
+        "offer.io",
+    ]
+
+
+def test_build_archive_record_includes_message_and_entity_metadata():
+    event = SimpleNamespace(
+        chat_id=-1001,
+        sender_id=777,
+        id=42,
+        date=SimpleNamespace(isoformat=lambda: "2026-05-24T12:00:00+00:00"),
+    )
+    chat = SimpleNamespace(title="Deals Channel", username="dealschannel")
+    sender = SimpleNamespace(
+        first_name="Ana",
+        last_name="Silva",
+        username="ana",
+    )
+
+    record = build_archive_record(
+        event=event,
+        message_text="Promo at https://example.com/deal",
+        contains_url=True,
+        webhook_status="sent",
+        image_base64=None,
+        has_image=False,
+        chat=chat,
+        sender=sender,
+    )
+
+    assert record["source_channel_title"] == "Deals Channel"
+    assert record["source_channel_username"] == "dealschannel"
+    assert record["source_channel_type"] == "SimpleNamespace"
+    assert record["sender_id"] == 777
+    assert record["sender_name"] == "Ana Silva"
+    assert record["sender_username"] == "ana"
+    assert record["message_length"] == len("Promo at https://example.com/deal")
+    assert record["contains_url"] is True
+    assert record["extracted_urls"] == "https://example.com/deal"
+    assert record["url_count"] == 1
+    assert record["has_image"] is False
+    assert record["image_base64"] is None
+    assert record["webhook_status"] == "sent"
+
+
+@pytest.mark.asyncio
+async def test_extract_image_base64_returns_encoded_bytes_for_photo_message():
+    message = SimpleNamespace(photo=SimpleNamespace())
+    event = SimpleNamespace(message=message, photo=message.photo)
+    client = MagicMock()
+    client.download_media = AsyncMock(return_value=b"fake-image-bytes")
+
+    encoded, has_image = await extract_image_base64(client, event)
+
+    assert has_image is True
+    assert encoded == base64.b64encode(b"fake-image-bytes").decode("ascii")
+
+
+@pytest.mark.asyncio
+async def test_extract_image_base64_returns_none_when_no_photo():
+    event = SimpleNamespace(message=SimpleNamespace(photo=None), photo=None)
+    client = MagicMock()
+    client.download_media = AsyncMock()
+
+    encoded, has_image = await extract_image_base64(client, event)
+
+    assert has_image is False
+    assert encoded is None
+
+
+@pytest.mark.asyncio
+async def test_process_monitored_message_with_fake_telegram_event(
+    tmp_path: Path,
+    caplog,
+):
+    archive_path = tmp_path / "archive" / "messages.csv"
+    runtime_config = {
+        "webhook_url": "http://localhost/webhook",
+        "retry_attempts": 3,
+        "retry_delay_seconds": 1,
+        "webhook_enabled": True,
+    }
+    chat = SimpleNamespace(title="Deals Channel", username="dealschannel")
+    sender = SimpleNamespace(
+        first_name="Ana",
+        last_name="Silva",
+        username="ana",
+    )
+    event = SimpleNamespace(
+        chat_id=-1001,
+        sender_id=777,
+        id=42,
+        raw_text="Promo https://example.com/deal",
+        date=SimpleNamespace(isoformat=lambda: "2026-05-24T12:00:00+00:00"),
+        message=SimpleNamespace(photo=SimpleNamespace()),
+        photo=SimpleNamespace(),
+        get_chat=AsyncMock(return_value=chat),
+        get_sender=AsyncMock(return_value=sender),
+    )
+    client = MagicMock()
+    client.download_media = AsyncMock(return_value=b"fake-image-bytes")
+    http_session = MagicMock()
+
+    with patch(
+        "listener.send_webhook",
+        new=AsyncMock(return_value=True),
+    ) as webhook_mock:
+        with caplog.at_level(logging.INFO):
+            archive_record = await process_monitored_message(
+                event=event,
+                client=client,
+                runtime_config=runtime_config,
+                http_session=http_session,
+                archive_path=archive_path,
+                logger=logging.getLogger("test"),
+            )
+
+    assert webhook_mock.await_count == 1
+    assert archive_path.exists()
+
+    with archive_path.open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+
+    assert len(rows) == 1
+    assert rows[0]["message_id"] == "42"
+    assert rows[0]["webhook_status"] == "sent"
+    assert rows[0]["has_image"] == "True"
+    assert rows[0]["image_base64"] == base64.b64encode(
+        b"fake-image-bytes"
+    ).decode("ascii")
+    assert archive_record["webhook_status"] == "sent"
+    assert archive_record["url_count"] == 1
+    assert "New message event received" in caplog.text
+    assert "URL detected for message_id=42; sending webhook" in caplog.text
+    assert "Message archived successfully" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_process_monitored_message_skips_webhook_when_disabled(
+    tmp_path: Path,
+    caplog,
+):
+    archive_path = tmp_path / "archive" / "messages.csv"
+    runtime_config = {
+        "webhook_url": "http://localhost/webhook",
+        "retry_attempts": 3,
+        "retry_delay_seconds": 1,
+        "webhook_enabled": False,
+    }
+    chat = SimpleNamespace(title="Deals Channel", username="dealschannel")
+    sender = SimpleNamespace(
+        first_name="Ana",
+        last_name="Silva",
+        username="ana",
+    )
+    event = SimpleNamespace(
+        chat_id=-1001,
+        sender_id=777,
+        id=44,
+        raw_text="Promo https://example.com/deal",
+        date=SimpleNamespace(isoformat=lambda: "2026-05-24T12:10:00+00:00"),
+        message=SimpleNamespace(photo=None),
+        photo=None,
+        get_chat=AsyncMock(return_value=chat),
+        get_sender=AsyncMock(return_value=sender),
+    )
+    client = MagicMock()
+    client.download_media = AsyncMock()
+    http_session = MagicMock()
+
+    with patch("listener.send_webhook", new=AsyncMock()) as webhook_mock:
+        with caplog.at_level(logging.INFO):
+            archive_record = await process_monitored_message(
+                event=event,
+                client=client,
+                runtime_config=runtime_config,
+                http_session=http_session,
+                archive_path=archive_path,
+                logger=logging.getLogger("test"),
+            )
+
+    assert webhook_mock.await_count == 0
+    assert archive_record["webhook_status"] == "skipped_webhook_disabled"
+    assert "webhook is disabled" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_start_listener_ignores_non_monitored_channel(
+    tmp_path: Path,
+    caplog,
+):
+    archive_path = tmp_path / "archive" / "messages.csv"
+    runtime_config = {
+        "webhook_url": "http://localhost/webhook",
+        "retry_attempts": 3,
+        "retry_delay_seconds": 1,
+        "webhook_enabled": False,
+        "channels": [{"id": -2002}],
+    }
+    event = SimpleNamespace(
+        chat_id=-1001,
+        sender_id=777,
+        id=43,
+        raw_text="Promo https://example.com/deal",
+        date=SimpleNamespace(
+            isoformat=lambda: "2026-05-24T12:05:00+00:00"
+        ),
+        get_chat=AsyncMock(side_effect=AssertionError("should not load chat")),
+        get_sender=AsyncMock(
+            side_effect=AssertionError("should not load sender")
+        ),
+    )
+    client = MagicMock()
+    client.start = AsyncMock()
+    client.get_me = AsyncMock(
+        return_value=SimpleNamespace(id=123, username="listener", phone="55")
+    )
+    client.on = MagicMock()
+    client.run_until_disconnected = AsyncMock()
+    http_session = MagicMock()
+
+    captured_handler = {}
+
+    def on_new_message(_event_filter):
+        def decorator(handler):
+            captured_handler["handler"] = handler
+            return handler
+
+        return decorator
+
+    client.on.side_effect = on_new_message
+
+    async def run_until_disconnected():
+        await captured_handler["handler"](event)
+
+    client.run_until_disconnected.side_effect = run_until_disconnected
+
+    http_session_context = MagicMock()
+    http_session_context.__aenter__ = AsyncMock(return_value=http_session)
+    http_session_context.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("listener.TelegramClient", return_value=client):
+        with patch(
+            "listener.aiohttp.ClientSession",
+            return_value=http_session_context,
+        ):
+            with patch(
+                "listener.process_monitored_message",
+                new=AsyncMock(),
+            ) as process_mock:
+                with caplog.at_level(logging.INFO):
+                    await start_listener(
+                        api_id=123,
+                        api_hash="hash",
+                        phone="+551199999999",
+                        session_name="test-session",
+                        config=runtime_config,
+                        archive_csv_path=archive_path,
+                    )
+
+    assert process_mock.await_count == 0
+    assert not archive_path.exists()
+    assert "is not in the monitored channel list" in caplog.text
+
+
+def test_archive_message_to_csv_appends_rows_and_keeps_header_once(
+    tmp_path: Path,
+):
+    archive_path = tmp_path / "data" / "messages.csv"
+
+    archive_message_to_csv(
+        archive_path,
+        {
+            "archived_at": "2026-05-24T12:00:00+00:00",
+            "processed_at": "2026-05-24T12:00:00+00:00",
+            "source_channel_id": -1001,
+            "source_channel_title": "Deals Channel",
+            "source_channel_username": "dealschannel",
+            "source_channel_type": "SimpleNamespace",
+            "sender_id": 777,
+            "sender_name": "Ana Silva",
+            "sender_username": "ana",
+            "message_id": 10,
+            "message_date": "2026-05-24T11:59:00+00:00",
+            "message_length": 16,
+            "message_text": "Deal, with comma",
+            "contains_url": True,
+            "extracted_urls": "https://example.com/deal",
+            "url_count": 1,
+            "has_image": True,
+            "image_base64": "ZmFrZS1pbWFnZS1ieXRlcw==",
+            "webhook_status": "sent",
+        },
+    )
+    archive_message_to_csv(
+        archive_path,
+        {
+            "archived_at": "2026-05-24T12:01:00+00:00",
+            "processed_at": "2026-05-24T12:01:00+00:00",
+            "source_channel_id": -1002,
+            "source_channel_title": "Deals Channel 2",
+            "source_channel_username": "deals2",
+            "source_channel_type": "SimpleNamespace",
+            "sender_id": 778,
+            "sender_name": "Bruno Silva",
+            "sender_username": "bruno",
+            "message_id": 11,
+            "message_date": "2026-05-24T12:00:30+00:00",
+            "message_length": 13,
+            "message_text": "No link here",
+            "contains_url": False,
+            "extracted_urls": "",
+            "url_count": 0,
+            "has_image": False,
+            "image_base64": None,
+            "webhook_status": "skipped_no_url",
+        },
+    )
+
+    with archive_path.open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+
+    assert archive_path.exists()
+    assert len(rows) == 2
+    assert rows[0]["message_text"] == "Deal, with comma"
+    assert rows[0]["source_channel_title"] == "Deals Channel"
+    assert rows[0]["webhook_status"] == "sent"
+    assert rows[1]["contains_url"] == "False"
+    assert rows[1]["webhook_status"] == "skipped_no_url"
+
+
+def test_archive_message_to_csv_creates_missing_file_and_parent_directory(
+    tmp_path: Path,
+):
+    archive_path = tmp_path / "nested" / "archive" / "messages.csv"
+
+    archive_message_to_csv(
+        archive_path,
+        {
+            "archived_at": "2026-05-24T12:30:00+00:00",
+            "processed_at": "2026-05-24T12:30:00+00:00",
+            "source_channel_id": -1003,
+            "source_channel_title": "Deals Channel 3",
+            "source_channel_username": "deals3",
+            "source_channel_type": "SimpleNamespace",
+            "sender_id": 779,
+            "sender_name": "Carla Lima",
+            "sender_username": "carla",
+            "message_id": 12,
+            "message_date": "2026-05-24T12:29:30+00:00",
+            "message_length": 20,
+            "message_text": "Fresh deal message",
+            "contains_url": False,
+            "extracted_urls": "",
+            "url_count": 0,
+            "has_image": False,
+            "image_base64": None,
+            "webhook_status": "skipped_no_url",
+        },
+    )
+
+    assert archive_path.exists()
+    assert archive_path.parent.exists()
+
+    with archive_path.open(encoding="utf-8", newline="") as file:
+        rows = list(csv.DictReader(file))
+
+    assert len(rows) == 1
+    assert rows[0]["message_text"] == "Fresh deal message"
 
 
 def test_config_file_change_handler_only_calls_callback_for_target_file(
@@ -134,7 +564,11 @@ def test_config_file_change_handler_only_calls_callback_for_target_file(
 ):
     config_path = (tmp_path / "channels.json").resolve()
     callback = MagicMock()
-    handler = ConfigFileChangeHandler(config_path, callback, logging.getLogger("test"))
+    handler = ConfigFileChangeHandler(
+        config_path,
+        callback,
+        logging.getLogger("test"),
+    )
 
     handler.on_modified(
         SimpleNamespace(
@@ -144,14 +578,20 @@ def test_config_file_change_handler_only_calls_callback_for_target_file(
     )
     callback.assert_not_called()
 
-    handler.on_modified(SimpleNamespace(is_directory=False, src_path=str(config_path)))
+    handler.on_modified(
+        SimpleNamespace(is_directory=False, src_path=str(config_path))
+    )
     callback.assert_called_once()
 
 
 def test_config_file_change_handler_handles_move_events(tmp_path: Path):
     config_path = (tmp_path / "channels.json").resolve()
     callback = MagicMock()
-    handler = ConfigFileChangeHandler(config_path, callback, logging.getLogger("test"))
+    handler = ConfigFileChangeHandler(
+        config_path,
+        callback,
+        logging.getLogger("test"),
+    )
 
     handler.on_moved(
         SimpleNamespace(

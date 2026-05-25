@@ -1,5 +1,6 @@
 {
   "webhook_url": "http://192.168.1.100:5678/webhook/dealscout",
+  "webhook_enabled": false,
   "retry_attempts": 3,
   "retry_delay_seconds": 5,
   "channels": [
