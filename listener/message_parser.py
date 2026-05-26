@@ -92,6 +92,17 @@ DESCRIPTION_NOISE_PREFIXES = (
     "aproveite",
     "corra",
 )
+CONTINUATION_PREFIXES = (
+    "cupom",
+    "código",
+    "codigo",
+    "por",
+    "de",
+    "antes",
+    "agora",
+    "r$",
+    "link",
+)
 PRICE_CONTEXT_WINDOW = 30
 LINE_START_CHECK_LENGTH = 20
 PARSE_CONFIDENCE_BASE = 0.15
@@ -411,20 +422,35 @@ def _parse_status(product_url: str | None, product_price: str | None, product_de
     return "empty"
 
 
+def _calculate_parse_confidence(
+    product_url: str | None,
+    product_price: str | None,
+    product_description: str | None,
+    coupon_code: str | None,
+    block_urls: list[str],
+) -> str:
+    value = min(
+        0.99,
+        round(
+            PARSE_CONFIDENCE_BASE
+            + (PARSE_CONFIDENCE_URL_WEIGHT if product_url else 0.0)
+            + (PARSE_CONFIDENCE_PRICE_WEIGHT if product_price else 0.0)
+            + (
+                PARSE_CONFIDENCE_DESCRIPTION_WEIGHT
+                if product_description
+                else 0.0
+            )
+            + (PARSE_CONFIDENCE_COUPON_WEIGHT if coupon_code else 0.0)
+            + (PARSE_CONFIDENCE_URL_BLOCK_WEIGHT if block_urls else 0.0),
+            2,
+        ),
+    )
+    return f"{value:.2f}"
+
+
 def _looks_like_new_product_line(line: str) -> bool:
     lowered = line.lower()
-    continuation_prefixes = (
-        "cupom",
-        "código",
-        "codigo",
-        "por",
-        "de",
-        "antes",
-        "agora",
-        "r$",
-        "link",
-    )
-    return not _contains_hint(lowered[:LINE_START_CHECK_LENGTH], continuation_prefixes)
+    return not lowered[:LINE_START_CHECK_LENGTH].startswith(CONTINUATION_PREFIXES)
 
 
 def _split_product_blocks(normalized_text: str) -> list[str]:
@@ -470,26 +496,6 @@ def _build_product(block_text: str, all_urls: list[str]) -> dict[str, Any]:
         price_data["product_price"],
         product_description,
     )
-    parse_confidence = min(
-        0.99,
-        round(
-            PARSE_CONFIDENCE_BASE
-            + (PARSE_CONFIDENCE_URL_WEIGHT if product_url else 0.0)
-            + (
-                PARSE_CONFIDENCE_PRICE_WEIGHT
-                if price_data["product_price"]
-                else 0.0
-            )
-            + (
-                PARSE_CONFIDENCE_DESCRIPTION_WEIGHT
-                if product_description
-                else 0.0
-            )
-            + (PARSE_CONFIDENCE_COUPON_WEIGHT if coupon_code else 0.0)
-            + (PARSE_CONFIDENCE_URL_BLOCK_WEIGHT if block_urls else 0.0),
-            2,
-        ),
-    )
 
     return {
         "product_url": product_url,
@@ -499,7 +505,13 @@ def _build_product(block_text: str, all_urls: list[str]) -> dict[str, Any]:
         "coupon_text": coupon_text,
         "is_affiliate_url": _is_affiliate_url(product_url),
         "parse_status": parse_status,
-        "parse_confidence": f"{parse_confidence:.2f}",
+        "parse_confidence": _calculate_parse_confidence(
+            product_url,
+            price_data["product_price"],
+            product_description,
+            coupon_code,
+            block_urls,
+        ),
         "all_urls": all_urls,
         "url_count": len(all_urls),
         **price_data,

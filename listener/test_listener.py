@@ -257,6 +257,19 @@ def test_parse_deal_message_splits_multiple_products_into_multiple_rows():
     assert parsed["products"][1]["product_url"] == "https://www.magazineluiza.com.br/p/CAFETEIRA456/"
 
 
+def test_parse_deal_message_cleans_description_noise():
+    parsed = parse_deal_message(
+        "🔥 Notebook Gamer #promo R$ 4.999,90 cupom: GAME10 "
+        "https://example.com/notebook compre agora"
+    )
+
+    description = parsed["products"][0]["product_description"]
+    assert "https://example.com/notebook" not in description
+    assert "4.999,90" not in description
+    assert "GAME10" not in description
+
+
+
 def test_build_archive_record_includes_message_and_entity_metadata():
     event = SimpleNamespace(
         chat_id=-1001,

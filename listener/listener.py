@@ -81,7 +81,7 @@ DEFAULT_PARSED_PRODUCT = {
     "coupon_code": None,
     "coupon_text": None,
     "product_description": None,
-    "is_affiliate_url": None,
+    "is_affiliate_url": False,
     "parse_status": None,
     "parse_confidence": None,
 }
@@ -609,7 +609,7 @@ async def process_monitored_message(
         sender=sender,
     )
 
-    final_archive_path = Path(archive_path)
+    final_archive_path: Path | None = None
     for archive_record in archive_records:
         final_archive_path = archive_message_to_csv(archive_path, archive_record)
     logger.info(
@@ -618,7 +618,7 @@ async def process_monitored_message(
             "message_id=%s csv=%s status=%s rows=%s"
         ),
         event.id,
-        final_archive_path,
+        final_archive_path or Path(archive_path),
         webhook_status,
         len(archive_records),
     )
