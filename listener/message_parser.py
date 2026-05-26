@@ -65,6 +65,7 @@ MARKETPLACE_HINTS = (
 )
 URL_CONTEXT_WINDOW = 80
 PRICE_CONTEXT_WINDOW = 40
+# Upper bound guard to avoid malformed numeric matches becoming unrealistic prices.
 MAX_PRICE_BRL = Decimal("10000000")
 MAX_PRICE_LINE_LENGTH = 18
 MIN_DESCRIPTION_LENGTH = 4
@@ -75,6 +76,7 @@ CONFIDENCE_PRICE_WEIGHT = 0.25
 CONFIDENCE_DESCRIPTION_WEIGHT = 0.2
 CONFIDENCE_COUPON_WEIGHT = 0.1
 CONFIDENCE_ORIGINAL_PRICE_WEIGHT = 0.1
+CONFIDENCE_PRICE_FALLBACK_PENALTY = 0.1
 DESCRIPTION_STRIP_CHARS = " -•\t"
 
 
@@ -327,7 +329,7 @@ def parse_structured_message(message: str | None) -> dict[str, Any]:
     if original_price_value is not None:
         confidence += CONFIDENCE_ORIGINAL_PRICE_WEIGHT
     if used_price_fallback:
-        confidence -= 0.1
+        confidence -= CONFIDENCE_PRICE_FALLBACK_PENALTY
 
     return {
         "normalized_message": normalized_message,

@@ -27,9 +27,6 @@ from listener import (
 )
 
 
-LEGACY_HEADER_FIELDS = ["message_id", "message_text", "webhook_status"]
-
-
 @pytest.mark.parametrize(
     "message,expected",
     [
@@ -675,6 +672,7 @@ def test_archive_message_to_csv_creates_missing_file_and_parent_directory(
 def test_archive_message_to_csv_keeps_legacy_header_when_file_exists(
     tmp_path: Path,
 ):
+    legacy_header_fields = ["message_id", "message_text", "webhook_status"]
     archive_path = tmp_path / "legacy" / "messages.csv"
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     archive_path.write_text(
@@ -698,7 +696,7 @@ def test_archive_message_to_csv_keeps_legacy_header_when_file_exists(
         rows = list(csv.DictReader(file))
 
     assert len(rows) == 2
-    assert list(rows[1].keys()) == LEGACY_HEADER_FIELDS
+    assert list(rows[1].keys()) == legacy_header_fields
     assert rows[1]["message_id"] == "2"
     assert rows[1]["message_text"] == "new row"
     assert rows[1]["webhook_status"] == "skipped_no_url"
