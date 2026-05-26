@@ -70,6 +70,21 @@ CSV_FIELDNAMES = [
 ]
 
 CSV_WRITE_LOCK = Lock()
+DEFAULT_PARSED_PRODUCT = {
+    "product_url": None,
+    "product_domain": None,
+    "product_price": None,
+    "price_currency": None,
+    "product_original_price": None,
+    "product_price_text": None,
+    "product_original_price_text": None,
+    "coupon_code": None,
+    "coupon_text": None,
+    "product_description": None,
+    "is_affiliate_url": None,
+    "parse_status": None,
+    "parse_confidence": None,
+}
 
 
 def _normalize_retry(value: Any, default: int) -> int:
@@ -144,6 +159,13 @@ def _format_entity_type(entity: Any) -> str | None:
     if entity is None:
         return None
     return type(entity).__name__
+
+
+def _first_parsed_product(parsed_message: Dict[str, Any]) -> Dict[str, Any]:
+    products = parsed_message.get("products") or []
+    if products:
+        return products[0]
+    return DEFAULT_PARSED_PRODUCT.copy()
 
 
 def _env_flag(value: str | None) -> bool:
@@ -312,7 +334,7 @@ def build_archive_record(
 ) -> Dict[str, Any]:
     parsed_message = parsed_message or parse_deal_message(message_text)
     if parsed_product is None:
-        parsed_product = parsed_message["products"][0] if parsed_message["products"] else {}
+        parsed_product = _first_parsed_product(parsed_message)
     all_urls = parsed_message["all_urls"]
     now_utc = datetime.now(timezone.utc).isoformat()
 
@@ -511,7 +533,7 @@ async def process_monitored_message(
         parsed_message["product_count"],
     )
 
-    primary_product = parsed_message["products"][0] if parsed_message["products"] else {}
+    primary_product = _first_parsed_product(parsed_message)
     payload = {
         "source_channel_id": event.chat_id,
         "message": message_text,

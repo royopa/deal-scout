@@ -94,6 +94,12 @@ DESCRIPTION_NOISE_PREFIXES = (
 )
 PRICE_CONTEXT_WINDOW = 30
 LINE_START_CHECK_LENGTH = 20
+PARSE_CONFIDENCE_BASE = 0.15
+PARSE_CONFIDENCE_URL_WEIGHT = 0.30
+PARSE_CONFIDENCE_PRICE_WEIGHT = 0.30
+PARSE_CONFIDENCE_DESCRIPTION_WEIGHT = 0.20
+PARSE_CONFIDENCE_COUPON_WEIGHT = 0.05
+PARSE_CONFIDENCE_URL_BLOCK_WEIGHT = 0.05
 
 
 def normalize_message_text(message_text: str | None) -> str:
@@ -467,12 +473,20 @@ def _build_product(block_text: str, all_urls: list[str]) -> dict[str, Any]:
     parse_confidence = min(
         0.99,
         round(
-            0.15
-            + (0.30 if product_url else 0.0)
-            + (0.30 if price_data["product_price"] else 0.0)
-            + (0.20 if product_description else 0.0)
-            + (0.05 if coupon_code else 0.0)
-            + (0.05 if block_urls else 0.0),
+            PARSE_CONFIDENCE_BASE
+            + (PARSE_CONFIDENCE_URL_WEIGHT if product_url else 0.0)
+            + (
+                PARSE_CONFIDENCE_PRICE_WEIGHT
+                if price_data["product_price"]
+                else 0.0
+            )
+            + (
+                PARSE_CONFIDENCE_DESCRIPTION_WEIGHT
+                if product_description
+                else 0.0
+            )
+            + (PARSE_CONFIDENCE_COUPON_WEIGHT if coupon_code else 0.0)
+            + (PARSE_CONFIDENCE_URL_BLOCK_WEIGHT if block_urls else 0.0),
             2,
         ),
     )
