@@ -36,7 +36,7 @@ SHORTENER_DOMAINS = {
     "t.co",
     "shope.ee",
     "s.click.aliexpress.com",
-    "mercadolivre.com.br.secure-link",
+    "mercadolivre.com.br-secure-link",
 }
 MARKETPLACE_DOMAINS = {
     "amazon.com.br",
@@ -387,6 +387,22 @@ def _extract_description(block_text: str) -> str | None:
     return fallback or None
 
 
+def _parse_status(product_url: str | None, product_price: str | None, product_description: str | None) -> str:
+    required_hits = sum(
+        bool(value)
+        for value in (
+            product_url,
+            product_price,
+            product_description,
+        )
+    )
+    if required_hits == 3:
+        return "complete"
+    if required_hits:
+        return "partial"
+    return "empty"
+
+
 def _looks_like_new_product_line(line: str) -> bool:
     lowered = line.lower()
     continuation_prefixes = (
@@ -441,16 +457,11 @@ def _build_product(block_text: str, all_urls: list[str]) -> dict[str, Any]:
     coupon_code, coupon_text = _extract_coupon(block_text)
     price_data = _extract_prices(block_text)
     product_description = _extract_description(block_text)
-    required_hits = sum(
-        bool(value)
-        for value in (
-            product_url,
-            price_data["product_price"],
-            product_description,
-        )
+    parse_status = _parse_status(
+        product_url,
+        price_data["product_price"],
+        product_description,
     )
-
-    parse_status = "complete" if required_hits == 3 else "partial" if required_hits else "empty"
     parse_confidence = min(
         0.99,
         round(
@@ -484,9 +495,6 @@ def parse_deal_message(message_text: str | None) -> dict[str, Any]:
     all_urls = extract_urls(normalized_text)
     product_blocks = _split_product_blocks(normalized_text)
     products = [_build_product(block, all_urls) for block in product_blocks]
-
-    if not products:
-        products = [_build_product(normalized_text, all_urls)]
 
     products = sorted(
         products,

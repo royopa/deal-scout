@@ -311,7 +311,8 @@ def build_archive_record(
     sender: Any = None,
 ) -> Dict[str, Any]:
     parsed_message = parsed_message or parse_deal_message(message_text)
-    parsed_product = parsed_product or (parsed_message["products"][0] if parsed_message["products"] else {})
+    if parsed_product is None:
+        parsed_product = parsed_message["products"][0] if parsed_message["products"] else {}
     all_urls = parsed_message["all_urls"]
     now_utc = datetime.now(timezone.utc).isoformat()
 
