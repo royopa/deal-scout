@@ -36,7 +36,6 @@ SHORTENER_DOMAINS = {
     "t.co",
     "shope.ee",
     "s.click.aliexpress.com",
-    "mercadolivre.com.br-secure-link",
 }
 MARKETPLACE_DOMAINS = {
     "amazon.com.br",

@@ -267,7 +267,7 @@ def test_parse_deal_message_cleans_description_noise():
     assert "https://example.com/notebook" not in description
     assert "4.999,90" not in description
     assert "GAME10" not in description
-
+    assert "Notebook Gamer" in description
 
 
 def test_build_archive_record_includes_message_and_entity_metadata():
