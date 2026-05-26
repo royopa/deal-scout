@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import Lock
 from typing import Any, Callable, Dict
+from urllib.parse import urlparse
 
 import aiohttp
 import time
@@ -28,7 +29,7 @@ from watchdog.observers import Observer
 class FatalListenerError(RuntimeError):
     pass
 
-CSV_SCHEMA_VERSION = "v2"
+CSV_SCHEMA_VERSION = "v3"
 
 CSV_FIELDNAMES = [
     "archived_at",
@@ -53,6 +54,13 @@ CSV_FIELDNAMES = [
     "message_product_count",
     "product_url",
     "product_domain",
+    "resolved_final_url",
+    "resolved_domain",
+    "official_product_url",
+    "official_store",
+    "affiliate_url",
+    "affiliate_status",
+    "affiliate_error",
     "product_price",
     "price_currency",
     "product_original_price",
@@ -73,6 +81,13 @@ CSV_WRITE_LOCK = Lock()
 DEFAULT_PARSED_PRODUCT = {
     "product_url": None,
     "product_domain": None,
+    "resolved_final_url": None,
+    "resolved_domain": None,
+    "official_product_url": None,
+    "official_store": "unknown",
+    "affiliate_url": None,
+    "affiliate_status": "skipped",
+    "affiliate_error": None,
     "product_price": None,
     "price_currency": None,
     "product_original_price": None,
@@ -84,6 +99,21 @@ DEFAULT_PARSED_PRODUCT = {
     "is_affiliate_url": False,
     "parse_status": None,
     "parse_confidence": None,
+}
+
+OFFICIAL_STORE_DOMAINS: dict[str, tuple[str, ...]] = {
+    "amazon": ("amazon.com.br", "amazon.com"),
+    "mercadolivre": ("mercadolivre.com.br", "mercadolivre.com"),
+    "aliexpress": ("aliexpress.com",),
+    "shopee": ("shopee.com.br", "shopee.com"),
+    "magalu": ("magazineluiza.com.br", "magalu.com"),
+    "americanas": ("americanas.com.br",),
+    "casasbahia": ("casasbahia.com.br",),
+    "pontofrio": ("pontofrio.com.br",),
+    "kabum": ("kabum.com.br",),
+    "carrefour": ("carrefour.com.br",),
+    "extra": ("extra.com.br",),
+    "fastshop": ("fastshop.com.br",),
 }
 
 
@@ -109,6 +139,14 @@ def _normalize_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return default
+
+
+def _normalize_timeout(value: Any, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 async def extract_image_base64(
@@ -166,6 +204,284 @@ def _first_parsed_product(parsed_message: Dict[str, Any]) -> Dict[str, Any]:
     if products:
         return products[0]
     return DEFAULT_PARSED_PRODUCT.copy()
+
+
+def _normalize_http_url(url: str | None) -> str | None:
+    if not url:
+        return None
+    normalized = url.strip()
+    if not normalized:
+        return None
+    if not normalized.lower().startswith(("http://", "https://")):
+        normalized = f"https://{normalized}"
+    parsed = urlparse(normalized)
+    if parsed.scheme not in {"http", "https"}:
+        return None
+    if not parsed.netloc:
+        return None
+    return normalized
+
+
+def _url_domain(url: str | None) -> str | None:
+    normalized = _normalize_http_url(url)
+    if not normalized:
+        return None
+    parsed = urlparse(normalized)
+    domain = parsed.netloc.lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
+    return domain or None
+
+
+def _detect_official_store(domain: str | None) -> str:
+    if not domain:
+        return "unknown"
+    for store_name, domains in OFFICIAL_STORE_DOMAINS.items():
+        if any(domain == candidate or domain.endswith(f".{candidate}") for candidate in domains):
+            return store_name
+    return "unknown"
+
+
+def _resolve_fallback_from_original_url(product_url: str | None) -> Dict[str, Any]:
+    normalized = _normalize_http_url(product_url)
+    resolved_domain = _url_domain(normalized)
+    official_store = _detect_official_store(resolved_domain)
+    return {
+        "resolved_final_url": normalized or product_url,
+        "resolved_domain": resolved_domain,
+        "official_product_url": normalized if official_store != "unknown" else None,
+        "official_store": official_store,
+    }
+
+
+def _extract_affiliate_candidate_url(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("affiliate_url", "url", "short_url", "link"):
+        candidate = payload.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
+async def resolve_product_url(
+    session: aiohttp.ClientSession,
+    product_url: str | None,
+    timeout_seconds: float,
+    max_hops: int,
+    retry_attempts: int,
+    logger: logging.Logger,
+) -> Dict[str, Any]:
+    fallback = _resolve_fallback_from_original_url(product_url)
+    normalized = _normalize_http_url(product_url)
+    if not normalized:
+        return fallback
+
+    attempts = max(1, retry_attempts)
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    last_error = ""
+
+    for attempt in range(1, attempts + 1):
+        try:
+            async with session.get(
+                normalized,
+                allow_redirects=True,
+                max_redirects=max_hops,
+                timeout=timeout,
+            ) as response:
+                final_url = str(response.url) if response.url else normalized
+                final_domain = _url_domain(final_url)
+                official_store = _detect_official_store(final_domain)
+                return {
+                    "resolved_final_url": final_url,
+                    "resolved_domain": final_domain,
+                    "official_product_url": (
+                        final_url if official_store != "unknown" else None
+                    ),
+                    "official_store": official_store,
+                }
+        except aiohttp.TooManyRedirects:
+            last_error = "too_many_redirects"
+        except asyncio.TimeoutError:
+            last_error = "timeout"
+        except aiohttp.ClientError:
+            last_error = "network_error"
+        except ValueError:
+            last_error = "invalid_url"
+
+        if attempt < attempts:
+            await asyncio.sleep(0.1)
+
+    logger.info(
+        "URL resolution fallback for product_url=%s reason=%s",
+        product_url,
+        last_error or "unknown",
+    )
+    return fallback
+
+
+async def request_affiliate_link(
+    session: aiohttp.ClientSession,
+    official_product_url: str | None,
+    official_store: str,
+    runtime_config: Dict[str, Any],
+    logger: logging.Logger,
+) -> Dict[str, Any]:
+    if not runtime_config.get("affiliate_enabled", False):
+        return {
+            "affiliate_url": None,
+            "affiliate_status": "skipped",
+            "affiliate_error": "affiliate_disabled",
+        }
+    if not official_product_url:
+        return {
+            "affiliate_url": None,
+            "affiliate_status": "skipped",
+            "affiliate_error": "missing_official_product_url",
+        }
+
+    api_url = (runtime_config.get("affiliate_api_url") or "").strip()
+    if not api_url:
+        return {
+            "affiliate_url": None,
+            "affiliate_status": "skipped",
+            "affiliate_error": "missing_affiliate_api_url",
+        }
+
+    token = (runtime_config.get("affiliate_api_token") or "").strip()
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    payload = {
+        "url": official_product_url,
+        "store": official_store,
+    }
+    attempts = max(1, runtime_config.get("affiliate_retry_attempts", 2))
+    timeout = aiohttp.ClientTimeout(
+        total=runtime_config.get("affiliate_timeout_seconds", 5.0)
+    )
+    last_error = "unknown_error"
+
+    for attempt in range(1, attempts + 1):
+        try:
+            async with session.post(
+                api_url,
+                json=payload,
+                headers=headers,
+                timeout=timeout,
+            ) as response:
+                if 200 <= response.status < 300:
+                    data = await response.json(content_type=None)
+                    affiliate_url = _extract_affiliate_candidate_url(data)
+                    if affiliate_url:
+                        return {
+                            "affiliate_url": affiliate_url,
+                            "affiliate_status": "success",
+                            "affiliate_error": None,
+                        }
+                    last_error = "invalid_affiliate_response"
+                else:
+                    last_error = f"http_{response.status}"
+        except asyncio.TimeoutError:
+            last_error = "timeout"
+        except aiohttp.ClientError:
+            last_error = "network_error"
+        except ValueError:
+            last_error = "invalid_json"
+
+        if attempt < attempts:
+            await asyncio.sleep(0.1)
+
+    logger.warning(
+        "Affiliate API fallback for official_product_url=%s reason=%s",
+        official_product_url,
+        last_error,
+    )
+    return {
+        "affiliate_url": None,
+        "affiliate_status": "failed",
+        "affiliate_error": last_error,
+    }
+
+
+async def enrich_products(
+    session: aiohttp.ClientSession,
+    products: list[Dict[str, Any]],
+    runtime_config: Dict[str, Any],
+    logger: logging.Logger,
+    message_id: Any,
+) -> tuple[list[Dict[str, Any]], Dict[str, int]]:
+    enriched_products: list[Dict[str, Any]] = []
+    counters = {
+        "resolved_products": 0,
+        "affiliate_success": 0,
+        "affiliate_failed": 0,
+        "affiliate_skipped": 0,
+    }
+
+    for index, product in enumerate(products, start=1):
+        product_url = product.get("product_url")
+        enriched = dict(product)
+        enriched.update(
+            {
+                "resolved_final_url": None,
+                "resolved_domain": None,
+                "official_product_url": None,
+                "official_store": "unknown",
+                "affiliate_url": None,
+                "affiliate_status": "skipped",
+                "affiliate_error": None,
+            }
+        )
+
+        if runtime_config.get("url_resolution_enabled", True):
+            resolved_data = await resolve_product_url(
+                session=session,
+                product_url=product_url,
+                timeout_seconds=runtime_config.get("url_resolve_timeout_seconds", 5.0),
+                max_hops=runtime_config.get("url_resolve_max_hops", 5),
+                retry_attempts=runtime_config.get("url_resolve_retry_attempts", 2),
+                logger=logger,
+            )
+        else:
+            resolved_data = _resolve_fallback_from_original_url(product_url)
+
+        enriched.update(resolved_data)
+        if enriched.get("resolved_final_url"):
+            counters["resolved_products"] += 1
+
+        affiliate_data = await request_affiliate_link(
+            session=session,
+            official_product_url=enriched.get("official_product_url"),
+            official_store=enriched.get("official_store") or "unknown",
+            runtime_config=runtime_config,
+            logger=logger,
+        )
+        enriched.update(affiliate_data)
+
+        if affiliate_data["affiliate_status"] == "success":
+            counters["affiliate_success"] += 1
+        elif affiliate_data["affiliate_status"] == "failed":
+            counters["affiliate_failed"] += 1
+        else:
+            counters["affiliate_skipped"] += 1
+
+        logger.info(
+            (
+                "Product enrichment message_id=%s index=%s "
+                "original_url=%s resolved_url=%s official_store=%s affiliate_status=%s"
+            ),
+            message_id,
+            index,
+            product_url,
+            enriched.get("resolved_final_url"),
+            enriched.get("official_store"),
+            enriched.get("affiliate_status"),
+        )
+        enriched_products.append(enriched)
+
+    return enriched_products, counters
 
 
 def _env_flag(value: str | None) -> bool:
@@ -361,6 +677,13 @@ def build_archive_record(
         "message_product_count": parsed_message["product_count"],
         "product_url": parsed_product.get("product_url"),
         "product_domain": parsed_product.get("product_domain"),
+        "resolved_final_url": parsed_product.get("resolved_final_url"),
+        "resolved_domain": parsed_product.get("resolved_domain"),
+        "official_product_url": parsed_product.get("official_product_url"),
+        "official_store": parsed_product.get("official_store"),
+        "affiliate_url": parsed_product.get("affiliate_url"),
+        "affiliate_status": parsed_product.get("affiliate_status"),
+        "affiliate_error": parsed_product.get("affiliate_error"),
         "product_price": parsed_product.get("product_price"),
         "price_currency": parsed_product.get("price_currency"),
         "product_original_price": parsed_product.get("product_original_price"),
@@ -469,6 +792,14 @@ async def process_monitored_message(
 
     message_text = event.raw_text or ""
     parsed_message = parse_deal_message(message_text)
+    enriched_products, enrichment_counters = await enrich_products(
+        session=http_session,
+        products=parsed_message["products"],
+        runtime_config=runtime_config,
+        logger=logger,
+        message_id=event.id,
+    )
+    parsed_message["products"] = enriched_products
     contains_url = parsed_message["url_count"] > 0
     webhook_status = "skipped_no_url"
     chat = None
@@ -548,6 +879,13 @@ async def process_monitored_message(
         "schema_version": CSV_SCHEMA_VERSION,
         "product_url": primary_product.get("product_url"),
         "product_domain": primary_product.get("product_domain"),
+        "resolved_final_url": primary_product.get("resolved_final_url"),
+        "resolved_domain": primary_product.get("resolved_domain"),
+        "official_product_url": primary_product.get("official_product_url"),
+        "official_store": primary_product.get("official_store"),
+        "affiliate_url": primary_product.get("affiliate_url"),
+        "affiliate_status": primary_product.get("affiliate_status"),
+        "affiliate_error": primary_product.get("affiliate_error"),
         "product_price": primary_product.get("product_price"),
         "price_currency": primary_product.get("price_currency"),
         "coupon_code": primary_product.get("coupon_code"),
@@ -614,6 +952,17 @@ async def process_monitored_message(
         final_archive_path = archive_message_to_csv(archive_path, archive_record)
     logger.info(
         (
+            "Enrichment summary for message_id=%s: resolved_products=%s "
+            "affiliate_success=%s affiliate_failed=%s affiliate_skipped=%s"
+        ),
+        event.id,
+        enrichment_counters["resolved_products"],
+        enrichment_counters["affiliate_success"],
+        enrichment_counters["affiliate_failed"],
+        enrichment_counters["affiliate_skipped"],
+    )
+    logger.info(
+        (
             "Message archived successfully: "
             "message_id=%s csv=%s status=%s rows=%s"
         ),
@@ -639,6 +988,15 @@ class RuntimeConfig:
         self._retry_attempts = 3
         self._retry_delay_seconds = 5
         self._webhook_enabled = False
+        self._url_resolution_enabled = True
+        self._url_resolve_timeout_seconds = 5.0
+        self._url_resolve_max_hops = 5
+        self._url_resolve_retry_attempts = 2
+        self._affiliate_enabled = False
+        self._affiliate_api_url = ""
+        self._affiliate_api_token = ""
+        self._affiliate_timeout_seconds = 5.0
+        self._affiliate_retry_attempts = 2
         self.update(config)
 
     def update(self, config: Dict[str, Any]) -> None:
@@ -657,6 +1015,36 @@ class RuntimeConfig:
                 config.get("webhook_enabled"),
                 False,
             )
+            self._url_resolution_enabled = _normalize_bool(
+                config.get("url_resolution_enabled"),
+                True,
+            )
+            self._url_resolve_timeout_seconds = _normalize_timeout(
+                config.get("url_resolve_timeout_seconds"),
+                5.0,
+            )
+            self._url_resolve_max_hops = _normalize_retry(
+                config.get("url_resolve_max_hops"),
+                5,
+            )
+            self._url_resolve_retry_attempts = _normalize_retry(
+                config.get("url_resolve_retry_attempts"),
+                2,
+            )
+            self._affiliate_enabled = _normalize_bool(
+                config.get("affiliate_enabled"),
+                False,
+            )
+            self._affiliate_api_url = (config.get("affiliate_api_url") or "").strip()
+            self._affiliate_api_token = (config.get("affiliate_api_token") or "").strip()
+            self._affiliate_timeout_seconds = _normalize_timeout(
+                config.get("affiliate_timeout_seconds"),
+                5.0,
+            )
+            self._affiliate_retry_attempts = _normalize_retry(
+                config.get("affiliate_retry_attempts"),
+                2,
+            )
 
     def snapshot(self) -> Dict[str, Any]:
         with self._lock:
@@ -666,6 +1054,15 @@ class RuntimeConfig:
                 "retry_attempts": self._retry_attempts,
                 "retry_delay_seconds": self._retry_delay_seconds,
                 "webhook_enabled": self._webhook_enabled,
+                "url_resolution_enabled": self._url_resolution_enabled,
+                "url_resolve_timeout_seconds": self._url_resolve_timeout_seconds,
+                "url_resolve_max_hops": self._url_resolve_max_hops,
+                "url_resolve_retry_attempts": self._url_resolve_retry_attempts,
+                "affiliate_enabled": self._affiliate_enabled,
+                "affiliate_api_url": self._affiliate_api_url,
+                "affiliate_api_token": self._affiliate_api_token,
+                "affiliate_timeout_seconds": self._affiliate_timeout_seconds,
+                "affiliate_retry_attempts": self._affiliate_retry_attempts,
             }
 
 
@@ -748,6 +1145,36 @@ def load_config(
         "webhook_enabled": _normalize_bool(
             config.get("webhook_enabled"),
             False,
+        ),
+        "url_resolution_enabled": _normalize_bool(
+            config.get("url_resolution_enabled"),
+            True,
+        ),
+        "url_resolve_timeout_seconds": _normalize_timeout(
+            config.get("url_resolve_timeout_seconds"),
+            5.0,
+        ),
+        "url_resolve_max_hops": _normalize_retry(
+            config.get("url_resolve_max_hops"),
+            5,
+        ),
+        "url_resolve_retry_attempts": _normalize_retry(
+            config.get("url_resolve_retry_attempts"),
+            2,
+        ),
+        "affiliate_enabled": _normalize_bool(
+            config.get("affiliate_enabled"),
+            False,
+        ),
+        "affiliate_api_url": (config.get("affiliate_api_url") or "").strip(),
+        "affiliate_api_token": (config.get("affiliate_api_token") or "").strip(),
+        "affiliate_timeout_seconds": _normalize_timeout(
+            config.get("affiliate_timeout_seconds"),
+            5.0,
+        ),
+        "affiliate_retry_attempts": _normalize_retry(
+            config.get("affiliate_retry_attempts"),
+            2,
         ),
         "channels": normalized_channels,
     }
@@ -991,6 +1418,65 @@ def main() -> None:
         config["webhook_enabled"] = _normalize_bool(
             env_webhook_enabled,
             config.get("webhook_enabled", False),
+        )
+
+    env_url_resolution_enabled = os.getenv("DEALSCOUT_ENABLE_URL_RESOLUTION")
+    if env_url_resolution_enabled is not None:
+        config["url_resolution_enabled"] = _normalize_bool(
+            env_url_resolution_enabled,
+            config.get("url_resolution_enabled", True),
+        )
+
+    env_url_resolve_timeout = os.getenv("DEALSCOUT_URL_RESOLVE_TIMEOUT_SECONDS")
+    if env_url_resolve_timeout is not None:
+        config["url_resolve_timeout_seconds"] = _normalize_timeout(
+            env_url_resolve_timeout,
+            config.get("url_resolve_timeout_seconds", 5.0),
+        )
+
+    env_url_resolve_max_hops = os.getenv("DEALSCOUT_URL_RESOLVE_MAX_HOPS")
+    if env_url_resolve_max_hops is not None:
+        config["url_resolve_max_hops"] = _normalize_retry(
+            env_url_resolve_max_hops,
+            config.get("url_resolve_max_hops", 5),
+        )
+
+    env_url_resolve_retry = os.getenv("DEALSCOUT_URL_RESOLVE_RETRY_ATTEMPTS")
+    if env_url_resolve_retry is not None:
+        config["url_resolve_retry_attempts"] = _normalize_retry(
+            env_url_resolve_retry,
+            config.get("url_resolve_retry_attempts", 2),
+        )
+
+    env_affiliate_enabled = os.getenv("DEALSCOUT_ENABLE_AFFILIATE")
+    if env_affiliate_enabled is not None:
+        config["affiliate_enabled"] = _normalize_bool(
+            env_affiliate_enabled,
+            config.get("affiliate_enabled", False),
+        )
+
+    env_affiliate_api_url = os.getenv("DEALSCOUT_AFFILIATE_API_URL")
+    if env_affiliate_api_url is not None:
+        config["affiliate_api_url"] = env_affiliate_api_url.strip()
+
+    env_affiliate_api_token = os.getenv("DEALSCOUT_AFFILIATE_API_TOKEN")
+    if env_affiliate_api_token is not None:
+        config["affiliate_api_token"] = env_affiliate_api_token.strip()
+
+    env_affiliate_timeout = os.getenv("DEALSCOUT_AFFILIATE_TIMEOUT_SECONDS")
+    if env_affiliate_timeout is not None:
+        config["affiliate_timeout_seconds"] = _normalize_timeout(
+            env_affiliate_timeout,
+            config.get("affiliate_timeout_seconds", 5.0),
+        )
+
+    env_affiliate_retry_attempts = os.getenv(
+        "DEALSCOUT_AFFILIATE_RETRY_ATTEMPTS"
+    )
+    if env_affiliate_retry_attempts is not None:
+        config["affiliate_retry_attempts"] = _normalize_retry(
+            env_affiliate_retry_attempts,
+            config.get("affiliate_retry_attempts", 2),
         )
 
     auto_restart = _normalize_bool(

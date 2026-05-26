@@ -81,6 +81,15 @@ With those values, the container will use:
 | `DEALSCOUT_ARCHIVE_CSV` | No | `message_archive.csv` | Path to the local CSV archive file |
 | `DEALSCOUT_ENABLE_WEBHOOK` | No | `false` | Enables webhook delivery when `true` |
 | `DEALSCOUT_VERBOSE_STARTUP` | No | `false` | Shows which monitored chats are visible in the session |
+| `DEALSCOUT_ENABLE_URL_RESOLUTION` | No | `true` | Enables redirect expansion and official store detection |
+| `DEALSCOUT_URL_RESOLVE_TIMEOUT_SECONDS` | No | `5` | Timeout for each URL resolution request |
+| `DEALSCOUT_URL_RESOLVE_MAX_HOPS` | No | `5` | Maximum redirect hops for URL resolution |
+| `DEALSCOUT_URL_RESOLVE_RETRY_ATTEMPTS` | No | `2` | Retry attempts when URL resolution fails |
+| `DEALSCOUT_ENABLE_AFFILIATE` | No | `false` | Enables affiliate API conversion |
+| `DEALSCOUT_AFFILIATE_API_URL` | No | empty | Affiliate API endpoint URL |
+| `DEALSCOUT_AFFILIATE_API_TOKEN` | No | empty | Bearer token sent to the affiliate API |
+| `DEALSCOUT_AFFILIATE_TIMEOUT_SECONDS` | No | `5` | Timeout for affiliate API requests |
+| `DEALSCOUT_AFFILIATE_RETRY_ATTEMPTS` | No | `2` | Retry attempts when affiliate API conversion fails |
 
 ## Channel Config
 
@@ -94,7 +103,7 @@ The CSV also includes richer metadata for future analysis, such as channel title
 
 Structured parsing now runs before archiving and webhook delivery. The listener normalizes each Telegram message, extracts candidate products, and writes one CSV row per detected product. Webhook payloads remain backward compatible and now also include structured product fields plus a `structured_products` array.
 
-### Archive schema (`schema_version=v2`)
+### Archive schema (`schema_version=v3`)
 
 New archive files use an extended header with these additional fields:
 
@@ -104,6 +113,13 @@ New archive files use an extended header with these additional fields:
 - `message_product_count`
 - `product_url`
 - `product_domain`
+- `resolved_final_url`
+- `resolved_domain`
+- `official_product_url`
+- `official_store`
+- `affiliate_url`
+- `affiliate_status`
+- `affiliate_error`
 - `product_price`
 - `price_currency`
 - `product_original_price`
@@ -129,16 +145,25 @@ Known limitations:
 - Product grouping is line/paragraph based, so malformed multi-product messages can generate imperfect splits.
 - Currency and language handling are intentionally limited to BRL/PT-BR for now.
 
-If an existing CSV already has the old header, the listener preserves that history and starts writing the new schema into a versioned sibling file such as `message_archive_v2.csv`.
+If an existing CSV already has the old header, the listener preserves that history and starts writing the new schema into a versioned sibling file such as `message_archive_v3.csv`.
 
 Example (`listener/channels.json.example`):
 
 ```json
 {
   "webhook_url": "http://192.168.1.100:5678/webhook/dealscout",
-   "webhook_enabled": false,
+  "webhook_enabled": false,
   "retry_attempts": 3,
   "retry_delay_seconds": 5,
+  "url_resolution_enabled": true,
+  "url_resolve_timeout_seconds": 5,
+  "url_resolve_max_hops": 5,
+  "url_resolve_retry_attempts": 2,
+  "affiliate_enabled": false,
+  "affiliate_api_url": "",
+  "affiliate_api_token": "",
+  "affiliate_timeout_seconds": 5,
+  "affiliate_retry_attempts": 2,
   "channels": [
     { "name": "Example Deal Channel", "id": -1001234567890 },
     { "name": "Another Deals Group", "id": -1009876543210 }
