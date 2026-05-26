@@ -535,25 +535,28 @@ async def test_start_listener_ignores_non_monitored_channel(
     http_session_context = MagicMock()
     http_session_context.__aenter__ = AsyncMock(return_value=http_session)
     http_session_context.__aexit__ = AsyncMock(return_value=None)
+    config_path = tmp_path / "channels.json"
+    config_path.write_text('{"channels":[{"id":-2002}]}', encoding="utf-8")
 
-    with patch("listener.TelegramClient", return_value=client):
-        with patch(
-            "listener.aiohttp.ClientSession",
-            return_value=http_session_context,
-        ):
+    with patch.dict("listener.os.environ", {"DEALSCOUT_CONFIG": str(config_path)}):
+        with patch("listener.TelegramClient", return_value=client):
             with patch(
-                "listener.process_monitored_message",
-                new=AsyncMock(),
-            ) as process_mock:
-                with caplog.at_level(logging.INFO):
-                    await start_listener(
-                        api_id=123,
-                        api_hash="hash",
-                        phone="+551199999999",
-                        session_name="test-session",
-                        config=runtime_config,
-                        archive_csv_path=archive_path,
-                    )
+                "listener.aiohttp.ClientSession",
+                return_value=http_session_context,
+            ):
+                with patch(
+                    "listener.process_monitored_message",
+                    new=AsyncMock(),
+                ) as process_mock:
+                    with caplog.at_level(logging.INFO):
+                        await start_listener(
+                            api_id=123,
+                            api_hash="hash",
+                            phone="+551199999999",
+                            session_name="test-session",
+                            config=runtime_config,
+                            archive_csv_path=archive_path,
+                        )
 
     assert process_mock.await_count == 0
     assert not archive_path.exists()
