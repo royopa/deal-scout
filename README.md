@@ -92,6 +92,45 @@ Webhook delivery is disabled by default. When you want to turn it back on, set `
 
 The CSV also includes richer metadata for future analysis, such as channel title and username, sender details, message length, the list of URLs extracted from the message, and `image_base64` when the message includes a photo.
 
+Structured parsing now runs before archiving and webhook delivery. The listener normalizes each Telegram message, extracts candidate products, and writes one CSV row per detected product. Webhook payloads remain backward compatible and now also include structured product fields plus a `structured_products` array.
+
+### Archive schema (`schema_version=v2`)
+
+New archive files use an extended header with these additional fields:
+
+- `schema_version`
+- `all_urls`
+- `message_product_index`
+- `message_product_count`
+- `product_url`
+- `product_domain`
+- `product_price`
+- `price_currency`
+- `product_original_price`
+- `product_price_text`
+- `product_original_price_text`
+- `coupon_code`
+- `coupon_text`
+- `product_description`
+- `is_affiliate_url`
+- `parse_status`
+- `parse_confidence`
+
+The parser currently targets PT-BR / BRL deal messages. Main heuristics:
+
+- URL priority prefers likely product links over shorteners while still flagging affiliate URLs.
+- Price extraction favors the current offer price and stores an optional previous price when both appear.
+- Coupon parsing separates the coupon code from the surrounding promotional sentence.
+- Description extraction removes operational noise such as hashtags, CTA lines, raw links, and tracking leftovers.
+
+Known limitations:
+
+- Messages with very noisy formatting or multiple links for the same product may still require manual review.
+- Product grouping is line/paragraph based, so malformed multi-product messages can generate imperfect splits.
+- Currency and language handling are intentionally limited to BRL/PT-BR for now.
+
+If an existing CSV already has the old header, the listener preserves that history and starts writing the new schema into a versioned sibling file such as `message_archive_v2.csv`.
+
 Example (`listener/channels.json.example`):
 
 ```json
