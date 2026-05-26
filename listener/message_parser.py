@@ -65,7 +65,7 @@ MARKETPLACE_HINTS = (
 )
 URL_CONTEXT_WINDOW = 80
 PRICE_CONTEXT_WINDOW = 40
-MAX_PRICE_BRL = Decimal("1000000")
+MAX_PRICE_BRL = Decimal("10000000")
 MAX_PRICE_LINE_LENGTH = 18
 MIN_DESCRIPTION_LENGTH = 4
 MAX_DESCRIPTION_LENGTH = 280
@@ -210,12 +210,13 @@ def _extract_price_candidates(message: str) -> list[dict[str, Any]]:
 
 def _select_current_and_original_price(
     candidates: list[dict[str, Any]],
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, bool]:
     if not candidates:
-        return None, None
+        return None, None, False
 
     current = None
     previous = None
+    used_fallback = False
     current_keywords = ("por", "sai por", "agora", "final", "fica", "pague")
     previous_keywords = ("de ", "antes", "era", "preço original", "normalmente")
 
@@ -232,12 +233,13 @@ def _select_current_and_original_price(
 
     if current is None:
         current = min(candidates, key=lambda item: item["value"])
+        used_fallback = True
     if previous is None and len(candidates) > 1:
         previous = max(candidates, key=lambda item: item["value"])
         if previous["value"] <= current["value"]:
             previous = None
 
-    return current, previous
+    return current, previous, used_fallback
 
 
 def _extract_coupon_data(message: str) -> tuple[str | None, str | None]:
@@ -299,9 +301,11 @@ def parse_structured_message(message: str | None) -> dict[str, Any]:
     affiliate_flag = is_affiliate_url(product_url)
 
     price_candidates = _extract_price_candidates(normalized_message)
-    current_price, original_price = _select_current_and_original_price(
-        price_candidates
-    )
+    (
+        current_price,
+        original_price,
+        used_price_fallback,
+    ) = _select_current_and_original_price(price_candidates)
     product_price = current_price["value"] if current_price else None
     product_price_raw = current_price["raw"] if current_price else None
     original_price_value = original_price["value"] if original_price else None
@@ -322,6 +326,8 @@ def parse_structured_message(message: str | None) -> dict[str, Any]:
         confidence += CONFIDENCE_COUPON_WEIGHT
     if original_price_value is not None:
         confidence += CONFIDENCE_ORIGINAL_PRICE_WEIGHT
+    if used_price_fallback:
+        confidence -= 0.1
 
     return {
         "normalized_message": normalized_message,

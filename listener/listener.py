@@ -319,7 +319,11 @@ def build_archive_record(
     sender: Any = None,
     structured_data: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    parsed = structured_data or parse_structured_message(message_text)
+    parsed = (
+        parse_structured_message(message_text)
+        if structured_data is None
+        else structured_data
+    )
     extracted_urls = parsed.get("all_urls") or []
     now_utc = datetime.now(timezone.utc).isoformat()
 
@@ -384,6 +388,17 @@ def archive_message_to_csv(
         existing_header = _read_existing_csv_header(path)
         fieldnames = existing_header or CSV_FIELDNAMES
         row = {field_name: record.get(field_name) for field_name in fieldnames}
+        if existing_header is not None:
+            omitted_fields = [
+                key
+                for key, value in record.items()
+                if key not in fieldnames and value not in (None, "")
+            ]
+            if omitted_fields:
+                logging.getLogger("dealscout.listener").info(
+                    "Appending to legacy CSV header; omitting fields: %s",
+                    sorted(omitted_fields),
+                )
         needs_header = existing_header is None
         with path.open("a", encoding="utf-8", newline="") as file:
             writer = csv.DictWriter(file, fieldnames=fieldnames)
