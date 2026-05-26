@@ -92,6 +92,8 @@ DESCRIPTION_NOISE_PREFIXES = (
     "aproveite",
     "corra",
 )
+PRICE_CONTEXT_WINDOW = 30
+LINE_START_CHECK_LENGTH = 20
 
 
 def normalize_message_text(message_text: str | None) -> str:
@@ -253,8 +255,8 @@ def _extract_price_candidates(text: str) -> list[dict[str, Any]]:
         if value is None:
             continue
 
-        context_start = max(0, match.start() - 30)
-        context_end = min(len(text), match.end() + 30)
+        context_start = max(0, match.start() - PRICE_CONTEXT_WINDOW)
+        context_end = min(len(text), match.end() + PRICE_CONTEXT_WINDOW)
         context = lowered[context_start:context_end]
         has_currency = "r$" in raw_text.lower() or "r$" in context
         has_hint = _contains_hint(context, CURRENT_PRICE_HINTS + PREVIOUS_PRICE_HINTS)
@@ -416,7 +418,7 @@ def _looks_like_new_product_line(line: str) -> bool:
         "r$",
         "link",
     )
-    return not _contains_hint(lowered[:20], continuation_prefixes)
+    return not _contains_hint(lowered[:LINE_START_CHECK_LENGTH], continuation_prefixes)
 
 
 def _split_product_blocks(normalized_text: str) -> list[str]:
