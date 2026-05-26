@@ -4,7 +4,6 @@ import base64
 import json
 import logging
 import os
-import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +14,11 @@ import aiohttp
 import time
 import yaml
 from dotenv import load_dotenv
+from message_parser import (
+    extract_urls,
+    message_contains_url,
+    parse_deal_message,
+)
 from telethon.errors import SessionPasswordNeededError
 from telethon import TelegramClient, events, utils
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
@@ -24,14 +28,12 @@ from watchdog.observers import Observer
 class FatalListenerError(RuntimeError):
     pass
 
-URL_PATTERN = re.compile(
-    r"(https?://\S+|www\.\S+|\b\S+\.(?:com|net|org|io|co|deals)\b)",
-    re.IGNORECASE,
-)
+CSV_SCHEMA_VERSION = "v2"
 
 CSV_FIELDNAMES = [
     "archived_at",
     "processed_at",
+    "schema_version",
     "source_channel_id",
     "source_channel_title",
     "source_channel_username",
@@ -45,19 +47,29 @@ CSV_FIELDNAMES = [
     "message_text",
     "contains_url",
     "extracted_urls",
+    "all_urls",
     "url_count",
+    "message_product_index",
+    "message_product_count",
+    "product_url",
+    "product_domain",
+    "product_price",
+    "price_currency",
+    "product_original_price",
+    "product_price_text",
+    "product_original_price_text",
+    "coupon_code",
+    "coupon_text",
+    "product_description",
+    "is_affiliate_url",
+    "parse_status",
+    "parse_confidence",
     "has_image",
     "image_base64",
     "webhook_status",
 ]
 
 CSV_WRITE_LOCK = Lock()
-
-
-def message_contains_url(message: str | None) -> bool:
-    if not message:
-        return False
-    return bool(URL_PATTERN.search(message))
 
 
 def _normalize_retry(value: Any, default: int) -> int:
@@ -82,12 +94,6 @@ def _normalize_bool(value: Any, default: bool = False) -> bool:
         if normalized in {"0", "false", "no", "off"}:
             return False
     return default
-
-
-def extract_urls(message: str | None) -> list[str]:
-    if not message:
-        return []
-    return URL_PATTERN.findall(message)
 
 
 async def extract_image_base64(
@@ -298,15 +304,21 @@ def build_archive_record(
     webhook_status: str,
     image_base64: str | None,
     has_image: bool,
+    parsed_message: Dict[str, Any] | None = None,
+    parsed_product: Dict[str, Any] | None = None,
+    product_index: int = 1,
     chat: Any = None,
     sender: Any = None,
 ) -> Dict[str, Any]:
-    extracted_urls = extract_urls(message_text)
+    parsed_message = parsed_message or parse_deal_message(message_text)
+    parsed_product = parsed_product or (parsed_message["products"][0] if parsed_message["products"] else {})
+    all_urls = parsed_message["all_urls"]
     now_utc = datetime.now(timezone.utc).isoformat()
 
     return {
         "archived_at": now_utc,
         "processed_at": now_utc,
+        "schema_version": CSV_SCHEMA_VERSION,
         "source_channel_id": event.chat_id,
         "source_channel_title": _format_person_name(chat),
         "source_channel_username": getattr(chat, "username", None),
@@ -319,19 +331,90 @@ def build_archive_record(
         "message_length": len(message_text),
         "message_text": message_text,
         "contains_url": contains_url,
-        "extracted_urls": " | ".join(extracted_urls),
-        "url_count": len(extracted_urls),
+        "extracted_urls": " | ".join(all_urls),
+        "all_urls": " | ".join(all_urls),
+        "url_count": parsed_message["url_count"],
+        "message_product_index": product_index,
+        "message_product_count": parsed_message["product_count"],
+        "product_url": parsed_product.get("product_url"),
+        "product_domain": parsed_product.get("product_domain"),
+        "product_price": parsed_product.get("product_price"),
+        "price_currency": parsed_product.get("price_currency"),
+        "product_original_price": parsed_product.get("product_original_price"),
+        "product_price_text": parsed_product.get("product_price_text"),
+        "product_original_price_text": parsed_product.get("product_original_price_text"),
+        "coupon_code": parsed_product.get("coupon_code"),
+        "coupon_text": parsed_product.get("coupon_text"),
+        "product_description": parsed_product.get("product_description"),
+        "is_affiliate_url": parsed_product.get("is_affiliate_url"),
+        "parse_status": parsed_product.get("parse_status"),
+        "parse_confidence": parsed_product.get("parse_confidence"),
         "has_image": has_image,
         "image_base64": image_base64,
         "webhook_status": webhook_status,
     }
 
 
+def build_archive_records(
+    event: events.NewMessage.Event,
+    message_text: str,
+    contains_url: bool,
+    webhook_status: str,
+    image_base64: str | None,
+    has_image: bool,
+    parsed_message: Dict[str, Any] | None = None,
+    chat: Any = None,
+    sender: Any = None,
+) -> list[Dict[str, Any]]:
+    parsed_message = parsed_message or parse_deal_message(message_text)
+    records: list[Dict[str, Any]] = []
+
+    for index, parsed_product in enumerate(parsed_message["products"], start=1):
+        records.append(
+            build_archive_record(
+                event=event,
+                message_text=message_text,
+                contains_url=contains_url,
+                webhook_status=webhook_status,
+                image_base64=image_base64,
+                has_image=has_image,
+                parsed_message=parsed_message,
+                parsed_product=parsed_product,
+                product_index=index,
+                chat=chat,
+                sender=sender,
+            )
+        )
+
+    return records
+
+
+def _resolve_archive_target_path(csv_path: str | Path) -> Path:
+    path = Path(csv_path)
+    if not path.exists() or path.stat().st_size == 0:
+        return path
+
+    with path.open(encoding="utf-8", newline="") as file:
+        header = next(csv.reader(file), [])
+
+    if header == CSV_FIELDNAMES:
+        return path
+
+    versioned_path = path.with_name(f"{path.stem}_{CSV_SCHEMA_VERSION}{path.suffix}")
+    if not versioned_path.exists() or versioned_path.stat().st_size == 0:
+        return versioned_path
+
+    with versioned_path.open(encoding="utf-8", newline="") as file:
+        versioned_header = next(csv.reader(file), [])
+
+    return versioned_path if versioned_header == CSV_FIELDNAMES else versioned_path
+
+
 def archive_message_to_csv(
     csv_path: str | Path,
     record: Dict[str, Any],
-) -> None:
-    path = Path(csv_path)
+) -> Path:
+    path = _resolve_archive_target_path(csv_path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     row = {field_name: record.get(field_name) for field_name in CSV_FIELDNAMES}
@@ -347,6 +430,7 @@ def archive_message_to_csv(
             if needs_header:
                 writer.writeheader()
             writer.writerow(row)
+    return path
 
 
 async def process_monitored_message(
@@ -364,7 +448,8 @@ async def process_monitored_message(
     )
 
     message_text = event.raw_text or ""
-    contains_url = message_contains_url(message_text)
+    parsed_message = parse_deal_message(message_text)
+    contains_url = parsed_message["url_count"] > 0
     webhook_status = "skipped_no_url"
     chat = None
     sender = None
@@ -420,18 +505,37 @@ async def process_monitored_message(
     logger.info(
         (
             "Archiving message to CSV: "
-            "message_id=%s length=%s url_count=%s"
+            "message_id=%s length=%s url_count=%s product_count=%s"
         ),
         event.id,
         len(message_text),
-        len(extract_urls(message_text)),
+        parsed_message["url_count"],
+        parsed_message["product_count"],
     )
 
+    primary_product = parsed_message["products"][0] if parsed_message["products"] else {}
     payload = {
         "source_channel_id": event.chat_id,
         "message": message_text,
         "message_id": event.id,
         "date": event.date.isoformat() if event.date else None,
+        "contains_url": contains_url,
+        "extracted_urls": " | ".join(parsed_message["all_urls"]),
+        "all_urls": parsed_message["all_urls"],
+        "url_count": parsed_message["url_count"],
+        "product_count": parsed_message["product_count"],
+        "structured_products": parsed_message["products"],
+        "schema_version": CSV_SCHEMA_VERSION,
+        "product_url": primary_product.get("product_url"),
+        "product_domain": primary_product.get("product_domain"),
+        "product_price": primary_product.get("product_price"),
+        "price_currency": primary_product.get("price_currency"),
+        "coupon_code": primary_product.get("coupon_code"),
+        "coupon_text": primary_product.get("coupon_text"),
+        "product_description": primary_product.get("product_description"),
+        "is_affiliate_url": primary_product.get("is_affiliate_url"),
+        "parse_status": primary_product.get("parse_status"),
+        "parse_confidence": primary_product.get("parse_confidence"),
     }
 
     webhook_enabled = runtime_config.get("webhook_enabled", False)
@@ -473,29 +577,38 @@ async def process_monitored_message(
             event.id,
         )
 
-    archive_record = build_archive_record(
+    archive_records = build_archive_records(
         event=event,
         message_text=message_text,
         contains_url=contains_url,
         webhook_status=webhook_status,
         image_base64=image_base64,
         has_image=has_image,
+        parsed_message=parsed_message,
         chat=chat,
         sender=sender,
     )
 
-    archive_message_to_csv(archive_path, archive_record)
+    final_archive_path = Path(archive_path)
+    for archive_record in archive_records:
+        final_archive_path = archive_message_to_csv(archive_path, archive_record)
     logger.info(
         (
             "Message archived successfully: "
-            "message_id=%s csv=%s status=%s"
+            "message_id=%s csv=%s status=%s rows=%s"
         ),
         event.id,
-        archive_path,
+        final_archive_path,
         webhook_status,
+        len(archive_records),
     )
 
-    return archive_record
+    return {
+        "records": archive_records,
+        "webhook_status": webhook_status,
+        "product_count": len(archive_records),
+        "url_count": parsed_message["url_count"],
+    }
 
 
 class RuntimeConfig:
