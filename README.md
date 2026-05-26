@@ -102,7 +102,7 @@ Selection and parsing rules:
 
 - Multiple items in the same message: stored as a single CSV row, with the best candidate promoted to `product_url` and all links preserved in `all_urls`.
 - Empty/missing values: stored as empty CSV cells (generated from `None` in the listener record).
-- Price parsing focuses on common PT-BR/BRL formats (`R$ 1.299,90`, `1299,90`, `1.299`).
+- Price parsing focuses on common PT-BR/BRL formats (`R$ 1.299,90`, `1299,90`, `1.299`), where `1.299` is interpreted as thousand-separated integer value (1299).
 - Webhook payloads keep backward compatibility (`message`, `message_id`, etc.) and now include `structured_data` plus key promoted fields.
 
 CSV compatibility strategy:

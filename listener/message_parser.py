@@ -49,7 +49,6 @@ SHORTENER_DOMAINS = {
     "tinyurl.com",
     "t.co",
     "amzn.to",
-    "mercadolivre.com.br",
 }
 MARKETPLACE_HINTS = (
     "amazon.",
