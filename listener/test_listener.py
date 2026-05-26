@@ -23,6 +23,8 @@ from listener import (
     log_visible_monitored_channels,
     parse_deal_message,
     process_monitored_message,
+    resolve_product_url,
+    request_affiliate_link,
     start_listener,
     send_webhook,
 )
@@ -381,6 +383,8 @@ async def test_process_monitored_message_with_fake_telegram_event(
         "retry_attempts": 3,
         "retry_delay_seconds": 1,
         "webhook_enabled": True,
+        "url_resolution_enabled": False,
+        "affiliate_enabled": False,
     }
     chat = SimpleNamespace(title="Deals Channel", username="dealschannel")
     sender = SimpleNamespace(
@@ -432,12 +436,17 @@ async def test_process_monitored_message_with_fake_telegram_event(
         b"fake-image-bytes"
     ).decode("ascii")
     assert rows[0]["product_url"] == "https://example.com/deal"
+    assert rows[0]["resolved_final_url"] == "https://example.com/deal"
+    assert rows[0]["official_store"] == "unknown"
+    assert rows[0]["affiliate_status"] == "skipped"
     assert result["webhook_status"] == "sent"
     assert result["url_count"] == 1
     assert result["product_count"] == 1
     assert result["records"][0]["product_url"] == "https://example.com/deal"
     sent_payload = webhook_mock.await_args.kwargs["payload"]
     assert sent_payload["product_url"] == "https://example.com/deal"
+    assert sent_payload["resolved_final_url"] == "https://example.com/deal"
+    assert sent_payload["affiliate_status"] == "skipped"
     assert sent_payload["structured_products"][0]["product_url"] == "https://example.com/deal"
     assert "New message event received" in caplog.text
     assert "URL detected for message_id=42; sending webhook" in caplog.text
@@ -455,6 +464,8 @@ async def test_process_monitored_message_skips_webhook_when_disabled(
         "retry_attempts": 3,
         "retry_delay_seconds": 1,
         "webhook_enabled": False,
+        "url_resolution_enabled": False,
+        "affiliate_enabled": False,
     }
     chat = SimpleNamespace(title="Deals Channel", username="dealschannel")
     sender = SimpleNamespace(
@@ -504,6 +515,8 @@ async def test_start_listener_ignores_non_monitored_channel(
         "retry_attempts": 3,
         "retry_delay_seconds": 1,
         "webhook_enabled": False,
+        "url_resolution_enabled": False,
+        "affiliate_enabled": False,
         "channels": [{"id": -2002}],
     }
     event = SimpleNamespace(
@@ -815,6 +828,126 @@ def _response_context(status: int):
     context_manager.__aenter__ = AsyncMock(return_value=response)
     context_manager.__aexit__ = AsyncMock(return_value=None)
     return context_manager
+
+
+def _response_context_with_url(status: int, url: str):
+    response = MagicMock()
+    response.status = status
+    response.url = url
+
+    context_manager = MagicMock()
+    context_manager.__aenter__ = AsyncMock(return_value=response)
+    context_manager.__aexit__ = AsyncMock(return_value=None)
+    return context_manager
+
+
+def _json_response_context(status: int, payload):
+    response = MagicMock()
+    response.status = status
+    response.json = AsyncMock(return_value=payload)
+
+    context_manager = MagicMock()
+    context_manager.__aenter__ = AsyncMock(return_value=response)
+    context_manager.__aexit__ = AsyncMock(return_value=None)
+    return context_manager
+
+
+@pytest.mark.asyncio
+async def test_resolve_product_url_successful_redirect_to_official_store():
+    session = MagicMock()
+    session.get.return_value = _response_context_with_url(
+        200,
+        "https://www.amazon.com.br/dp/B0TEST123",
+    )
+
+    resolved = await resolve_product_url(
+        session=session,
+        product_url="https://amzn.to/abc123",
+        timeout_seconds=3.0,
+        max_hops=5,
+        retry_attempts=2,
+        logger=logging.getLogger("test"),
+    )
+
+    assert resolved["resolved_final_url"] == "https://www.amazon.com.br/dp/B0TEST123"
+    assert resolved["resolved_domain"] == "amazon.com.br"
+    assert resolved["official_store"] == "amazon"
+    assert resolved["official_product_url"] == "https://www.amazon.com.br/dp/B0TEST123"
+
+
+@pytest.mark.asyncio
+async def test_resolve_product_url_falls_back_on_redirect_loop():
+    session = MagicMock()
+    session.get.side_effect = aiohttp.TooManyRedirects(
+        history=(),
+        request_info=MagicMock(),
+    )
+
+    resolved = await resolve_product_url(
+        session=session,
+        product_url="https://bit.ly/loop",
+        timeout_seconds=1.0,
+        max_hops=2,
+        retry_attempts=1,
+        logger=logging.getLogger("test"),
+    )
+
+    assert resolved["resolved_final_url"] == "https://bit.ly/loop"
+    assert resolved["official_store"] == "unknown"
+    assert resolved["official_product_url"] is None
+
+
+@pytest.mark.asyncio
+async def test_request_affiliate_link_success():
+    session = MagicMock()
+    session.post.return_value = _json_response_context(
+        200,
+        {"affiliate_url": "https://affiliate.example.com/a1"},
+    )
+    runtime_config = {
+        "affiliate_enabled": True,
+        "affiliate_api_url": "https://affiliate.api/convert",
+        "affiliate_api_token": "secret-token",
+        "affiliate_timeout_seconds": 5.0,
+        "affiliate_retry_attempts": 2,
+    }
+
+    result = await request_affiliate_link(
+        session=session,
+        official_product_url="https://www.amazon.com.br/dp/B0TEST123",
+        official_store="amazon",
+        runtime_config=runtime_config,
+        logger=logging.getLogger("test"),
+    )
+
+    assert result["affiliate_status"] == "success"
+    assert result["affiliate_url"] == "https://affiliate.example.com/a1"
+    assert result["affiliate_error"] is None
+
+
+@pytest.mark.asyncio
+async def test_request_affiliate_link_fallback_on_failure():
+    session = MagicMock()
+    session.post.side_effect = aiohttp.ClientError("offline")
+    runtime_config = {
+        "affiliate_enabled": True,
+        "affiliate_api_url": "https://affiliate.api/convert",
+        "affiliate_api_token": "",
+        "affiliate_timeout_seconds": 5.0,
+        "affiliate_retry_attempts": 2,
+    }
+
+    result = await request_affiliate_link(
+        session=session,
+        official_product_url="https://www.amazon.com.br/dp/B0TEST123",
+        official_store="amazon",
+        runtime_config=runtime_config,
+        logger=logging.getLogger("test"),
+    )
+
+    assert result["affiliate_status"] == "failed"
+    assert result["affiliate_url"] is None
+    assert result["affiliate_error"] == "network_error"
 
 
 @pytest.mark.asyncio
