@@ -76,7 +76,7 @@ CURRENT_PRICE_HINTS = (
     "promoção",
 )
 PREVIOUS_PRICE_HINTS = (
-    "de ",
+    "de",
     "antes",
     "era",
     "preço normal",
@@ -149,7 +149,9 @@ def _url_domain(url: str | None) -> str | None:
         return None
     normalized = url if re.match(r"^[a-z]+://", url, re.IGNORECASE) else f"https://{url}"
     parsed = urlparse(normalized)
-    domain = parsed.netloc.lower().lstrip("www.")
+    domain = parsed.netloc.lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
     return domain or None
 
 
@@ -231,6 +233,15 @@ def _format_decimal(value: Decimal | None) -> str | None:
     return f"{value.quantize(Decimal('0.01'))}"
 
 
+def _contains_hint(text: str, hints: tuple[str, ...]) -> bool:
+    lowered = text.lower()
+    for hint in hints:
+        pattern = rf"(?<!\w){re.escape(hint)}(?!\w)"
+        if re.search(pattern, lowered):
+            return True
+    return False
+
+
 def _extract_price_candidates(text: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     lowered = text.lower()
@@ -246,16 +257,16 @@ def _extract_price_candidates(text: str) -> list[dict[str, Any]]:
         context_end = min(len(text), match.end() + 30)
         context = lowered[context_start:context_end]
         has_currency = "r$" in raw_text.lower() or "r$" in context
-        has_hint = any(hint in context for hint in CURRENT_PRICE_HINTS + PREVIOUS_PRICE_HINTS)
+        has_hint = _contains_hint(context, CURRENT_PRICE_HINTS + PREVIOUS_PRICE_HINTS)
         if not has_currency and not has_hint and value < Decimal("100"):
             continue
 
         current_score = 1
         previous_score = 0
 
-        if any(hint in context for hint in CURRENT_PRICE_HINTS):
+        if _contains_hint(context, CURRENT_PRICE_HINTS):
             current_score += 2
-        if any(hint in context for hint in PREVIOUS_PRICE_HINTS):
+        if _contains_hint(context, PREVIOUS_PRICE_HINTS):
             previous_score += 3
         if re.search(rf"de\s+{re.escape(raw_text.lower())}", context):
             previous_score += 2
@@ -382,16 +393,14 @@ def _looks_like_new_product_line(line: str) -> bool:
         "cupom",
         "código",
         "codigo",
-        "por ",
-        "de ",
+        "por",
+        "de",
         "antes",
         "agora",
         "r$",
         "link",
     )
-    if lowered.startswith(continuation_prefixes):
-        return False
-    return True
+    return not _contains_hint(lowered[:20], continuation_prefixes)
 
 
 def _split_product_blocks(normalized_text: str) -> list[str]:

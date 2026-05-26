@@ -404,10 +404,7 @@ def _resolve_archive_target_path(csv_path: str | Path) -> Path:
     if not versioned_path.exists() or versioned_path.stat().st_size == 0:
         return versioned_path
 
-    with versioned_path.open(encoding="utf-8", newline="") as file:
-        versioned_header = next(csv.reader(file), [])
-
-    return versioned_path if versioned_header == CSV_FIELDNAMES else versioned_path
+    return versioned_path
 
 
 def archive_message_to_csv(
